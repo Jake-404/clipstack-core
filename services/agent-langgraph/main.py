@@ -13,8 +13,8 @@ nodes) but doesn't execute live calls until A.2.
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 from uuid import uuid4
 
 import structlog

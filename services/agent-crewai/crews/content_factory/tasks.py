@@ -55,7 +55,9 @@ def task_long_form(writer: Agent, context: list[Task]) -> Task:
         ),
         agent=writer,
         context=context,
-        expected_output="Long-form draft (markdown) with inline citations [n] and a citations list.",
+        expected_output=(
+            "Long-form draft (markdown) with inline citations [n] and a citations list."
+        ),
     )
 
 

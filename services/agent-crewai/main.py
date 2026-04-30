@@ -11,8 +11,8 @@ once `retrieve_high_performers` and `voice_score` tools are wired.
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 from uuid import uuid4
 
 import structlog

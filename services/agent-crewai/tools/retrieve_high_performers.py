@@ -16,7 +16,6 @@ from typing import Literal
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 
-
 Kpi = Literal["ctr", "engagement_rate", "conversion", "reach"]
 
 

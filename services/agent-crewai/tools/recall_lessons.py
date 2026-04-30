@@ -16,7 +16,6 @@ from typing import Literal
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 
-
 Scope = Literal["forever", "this_topic", "this_client"]
 
 
