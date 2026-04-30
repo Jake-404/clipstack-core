@@ -86,18 +86,60 @@ def task_newsletter_adapt(adapter: Agent, context: list[Task]) -> Task:
     )
 
 
-def task_brand_qa(qa: Agent, context: list[Task]) -> Task:
+def task_devils_advocate(qa: Agent, context: list[Task]) -> Task:
+    """Adversarial review pass. Runs above BrandQA — its verdict feeds in.
+
+    Output is structured so BrandQA can ingest it without re-reading every
+    draft. Per-draft fields:
+      - harm_risk          : float 0..1
+      - weak_implications  : [{sentence, why_weak}]
+      - framing_issues     : [{sentence, why_misleading}]
+      - lessons_contradicted: [{lesson_id, how_contradicted}]
+      - verdict            : 'pass' | 'revise' | 'block'
+    """
     return Task(
         description=(
-            "Score every adapted draft against the brand voice corpus via "
-            "`voice_score`. Verify every cited claim via `claim_verifier`. "
-            "Recall lessons via `recall_lessons` to check the workspace's "
-            "history of corrections.\n\n"
-            "If any draft scores below threshold OR has an unverified claim "
-            "OR violates a captured lesson, return a structured BLOCK verdict "
-            "with revision instructions. Otherwise PASS."
+            "For each adapted draft (long-form, every per-platform reshape, "
+            "and the newsletter), do an adversarial read.\n\n"
+            "Use `recall_lessons` with `scope='forever'` for the company to "
+            "surface guardrails this team has captured. Then for each draft, "
+            "identify:\n"
+            "  - claims that are technically true but imply something the "
+            "    source does not support\n"
+            "  - framings a hostile reader would call misleading or slanted\n"
+            "  - sentences that contradict any recalled `forever` lesson\n\n"
+            "Score the draft's `harm_risk` from 0 (no concerns) to 1 (do not "
+            "ship). Emit verdict: 'pass' (harm_risk < 0.3 and no contradictions), "
+            "'revise' (issues fixable inline), or 'block' (structural problem)."
         ),
         agent=qa,
         context=context,
-        expected_output="Verdict (PASS|BLOCK) + per-draft scores + revision notes.",
+        expected_output=(
+            "Per-draft adversarial review (JSON) with harm_risk, "
+            "weak_implications, framing_issues, lessons_contradicted, verdict."
+        ),
+    )
+
+
+def task_brand_qa(qa: Agent, context: list[Task]) -> Task:
+    return Task(
+        description=(
+            "Read the DevilsAdvocateQA verdict from the prior task FIRST. Any "
+            "draft it marked 'block' fails immediately. Any 'revise' findings "
+            "must be either (a) fixed in your output verdict's revision notes "
+            "or (b) escalated to BLOCK if you can't see how to fix.\n\n"
+            "Then score every adapted draft against the brand voice corpus "
+            "via `voice_score`. Verify every cited claim via `claim_verifier`. "
+            "Recall lessons via `recall_lessons` to check the workspace's "
+            "history of corrections.\n\n"
+            "Final verdict per draft: PASS (devil's advocate cleared, voice "
+            "above threshold, all claims verified, no lesson violations), "
+            "REVISE (fixable issues with concrete instructions), or BLOCK."
+        ),
+        agent=qa,
+        context=context,
+        expected_output=(
+            "Verdict (PASS|REVISE|BLOCK) + per-draft voice_score + claim "
+            "verdicts + DevilsAdvocate harm_risk passthrough + revision notes."
+        ),
     )

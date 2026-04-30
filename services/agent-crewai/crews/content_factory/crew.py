@@ -11,6 +11,7 @@ from crewai import Crew, Process
 
 from .agents import (
     make_brand_qa,
+    make_devils_advocate_qa,
     make_long_form_writer,
     make_newsletter_adapter,
     make_researcher,
@@ -19,6 +20,7 @@ from .agents import (
 )
 from .tasks import (
     task_brand_qa,
+    task_devils_advocate,
     task_long_form,
     task_newsletter_adapt,
     task_research,
@@ -52,6 +54,7 @@ def build_content_factory_crew(
     strategist = make_strategist()
     writer = make_long_form_writer()
     newsletter = make_newsletter_adapter()
+    devils = make_devils_advocate_qa()
     qa = make_brand_qa()
 
     social_agents = {p: make_social_adapter(p) for p in platforms}
@@ -63,7 +66,10 @@ def build_content_factory_crew(
         task_social_adapt(social_agents[p], p, context=[t_long]) for p in platforms
     ]
     t_news = task_newsletter_adapt(newsletter, context=[t_long])
-    t_qa = task_brand_qa(qa, context=[t_long, *t_socials, t_news])
+    # Devil's advocate (Doc 5 §1.6) runs above claim verification — its verdict
+    # feeds BrandQA so a single human approval surface sees both layers' findings.
+    t_devils = task_devils_advocate(devils, context=[t_long, *t_socials, t_news])
+    t_qa = task_brand_qa(qa, context=[t_long, *t_socials, t_news, t_devils])
 
     crew = Crew(
         agents=[
@@ -72,9 +78,10 @@ def build_content_factory_crew(
             writer,
             *social_agents.values(),
             newsletter,
+            devils,
             qa,
         ],
-        tasks=[t_research, t_strat, t_long, *t_socials, t_news, t_qa],
+        tasks=[t_research, t_strat, t_long, *t_socials, t_news, t_devils, t_qa],
         process=Process.sequential,
         verbose=False,
         memory=False,  # Persistent memory is `company_lessons` + Qdrant — not CrewAI-native.

@@ -67,11 +67,12 @@ async def list_crews() -> dict[str, list[str]]:
     """Discoverable list. Phase A.0 ships content_factory only.
 
     Roadmap (Doc 1 §7.x + Doc 4 §2.6–§2.10):
-    - content_factory     [A.0]  this skeleton
+    - content_factory     [A.0]  Researcher → Strategist → LongFormWriter →
+                                  SocialAdapter → NewsletterAdapter →
+                                  DevilsAdvocateQA (added A.1) → BrandQA
     - social_listener     [A.3]  single-agent toolbelt
     - weekly_report       [A.3]  data-puller + analyst-writer + editor
     - brand_qa            [A.2]  voice fingerprinting
-    - devils_advocate_qa  [A.1]  Doc 5 §1.6
     - engagement          [A.3]  Doc 4 §2.9
     - lifecycle           [A.3]  Doc 4 §2.10
     - trend_detector      [A.3]  brand-safety gated

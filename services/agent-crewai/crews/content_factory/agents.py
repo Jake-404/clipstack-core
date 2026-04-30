@@ -134,6 +134,41 @@ def make_newsletter_adapter() -> Agent:
     )
 
 
+def make_devils_advocate_qa() -> Agent:
+    """Adversarial reader. Doc 5 §1.6.
+
+    Catches the failure mode that claim-verification misses: the draft's
+    factual claims are all sourced and verifiable, but the implications drawn
+    from them are weak, misleading, or contradict a previously-captured lesson.
+    Runs above claim verification — its findings feed into BrandQA's gate.
+
+    LLM is JUDGE_MODEL (separate vendor from the writer) so the same biases
+    that produced the draft don't whitewash it on review.
+    """
+    return Agent(
+        role="DevilsAdvocateQA",
+        goal=(
+            "Read every draft adversarially. For each, surface (a) claims that "
+            "are technically true but imply something the source does not "
+            "support; (b) framings a hostile reader would call misleading; "
+            "(c) any contradiction with `forever`-scoped lessons captured by "
+            "this team. Score `harm_risk` 0–1 and emit a structured verdict."
+        ),
+        backstory=(
+            "You're the team's hostile-reviewer-in-residence. You don't write "
+            "and you don't strategise. You find the words that boomerang — "
+            "the sentence that reads fine and lands wrong, the citation that "
+            "implies more than the source proves, the framing the audience "
+            "calls slanted. Most production failures are correctly-cited "
+            "claims that mean something the writer didn't intend."
+        ),
+        tools=[recall_lessons_tool],
+        llm=_judge(),
+        allow_delegation=False,
+        verbose=False,
+    )
+
+
 def make_brand_qa() -> Agent:
     """The voice-fingerprint critic (USP 3). Phase A.0 ships the role; the
     SetFit-backed `voice_score` becomes a real call in A.2."""
