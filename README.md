@@ -73,6 +73,10 @@ cd services/agent-langgraph && uv sync && uv run uvicorn main:app --reload --por
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md). The hard rule: `core/` cannot import from `signals/`. Period.
 
+## Legal templates
+
+Procurement-ready templates for ToS, Privacy, IP ownership, AI-content disclosure, and DPA live under [`legal/`](./legal/). They are starting points, not legal advice — counsel must review before any production deployment.
+
 ## License
 
 MIT — see [LICENSE](./LICENSE).
