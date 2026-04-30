@@ -20,7 +20,7 @@ const queueItems = [
   { id: "a1", title: "Q2 outlook for VeChain holders — LinkedIn carousel", agentLabel: "S", agentShape: "hexagon" as const, agentColor: "amber" as const, ageMinutes: 12, predictedPercentile: 78, channel: "linkedin" },
   { id: "a2", title: "VTHO staking yield explainer thread", agentLabel: "C", agentShape: "circle" as const, agentColor: "violet" as const, ageMinutes: 47, predictedPercentile: 64, channel: "x" },
   { id: "a3", title: "MiCA Q&A — investor newsletter draft", agentLabel: "L", agentShape: "rounded-square" as const, agentColor: "violet" as const, ageMinutes: 92, predictedPercentile: 71, channel: "newsletter" },
-  { id: "a4", title: "CREAM partnership announcement", agentLabel: "S", agentShape: "hexagon" as const, agentColor: "amber" as const, ageMinutes: 180, predictedPercentile: 49, channel: "x" },
+  { id: "a4", title: "Q3 ecosystem partnership rollout — coordinated launch", agentLabel: "S", agentShape: "hexagon" as const, agentColor: "amber" as const, ageMinutes: 180, predictedPercentile: 49, channel: "x" },
 ];
 
 const agents = [
