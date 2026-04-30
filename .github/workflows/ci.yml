@@ -34,11 +34,11 @@ jobs:
       - run: pnpm typecheck
 
   python-lint:
-    name: agent-crewai + agent-langgraph lint
+    name: python services lint
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [agent-crewai, agent-langgraph]
+        service: [agent-crewai, agent-langgraph, pii-detection]
     defaults:
       run:
         working-directory: services/${{ matrix.service }}
