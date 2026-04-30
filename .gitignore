@@ -1,0 +1,58 @@
+# ─── Secrets ───────────────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+.env.production
+*.pem
+*.key
+credentials.json
+
+# ─── Node / TypeScript ─────────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+.turbo/
+next-env.d.ts
+
+# ─── Python ────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+.python-version
+
+# ─── uv (CrewAI + LangGraph services) ──────────────────────────────────────
+uv.lock
+
+# ─── Docker / volumes (when running locally) ───────────────────────────────
+postgres_data/
+qdrant_data/
+redpanda_data/
+n8n_data/
+ollama_data/
+
+# ─── Editor / OS ───────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# ─── Logs ──────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ─── Local-only smoke artifacts ────────────────────────────────────────────
+.checkpoints/
+*.local.yaml
+*.local.json

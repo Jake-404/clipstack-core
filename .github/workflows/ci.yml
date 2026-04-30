@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  isolation:
+    name: core/ isolation check (no imports from signals/)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: chmod +x scripts/check-core-isolation.sh
+      - run: ./scripts/check-core-isolation.sh
+
+  ui-typecheck:
+    name: approval-ui typecheck
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/approval-ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: services/approval-ui/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+
+  python-lint:
+    name: agent-crewai + agent-langgraph lint
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [agent-crewai, agent-langgraph]
+    defaults:
+      run:
+        working-directory: services/${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: uv sync
+      - run: uv run ruff check .
+      - run: uv run mypy . || true  # advisory until type coverage matures
+
+  docker-compose-validate:
+    name: docker-compose config validates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose config --quiet

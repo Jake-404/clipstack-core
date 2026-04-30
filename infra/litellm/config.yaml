@@ -1,0 +1,65 @@
+# LiteLLM router config — named profiles per Doc 1 §5.
+# A model swap is a config change here, never a code change in services/agent-crewai/.
+# Profiles consumed by services/agent-crewai/models.py.
+
+model_list:
+  # ─── Frontier writers (long-form, brand voice, judgment calls) ─────────────
+  - model_name: writer-frontier
+    litellm_params:
+      model: anthropic/claude-sonnet-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+      max_tokens: 8192
+
+  - model_name: writer-frontier-opus
+    litellm_params:
+      model: anthropic/claude-opus-4-1
+      api_key: os.environ/ANTHROPIC_API_KEY
+      max_tokens: 8192
+
+  # ─── Mid-tier classifier / scorer / judge ──────────────────────────────────
+  - model_name: classifier-fast
+    litellm_params:
+      model: anthropic/claude-haiku-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+      max_tokens: 2048
+
+  - model_name: judge-balanced
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+
+  # ─── Local-model fallback (PII-safe path; Ollama) ──────────────────────────
+  - model_name: writer-local
+    litellm_params:
+      model: ollama/llama3.1:8b
+      api_base: http://ollama:11434
+
+  - model_name: classifier-local
+    litellm_params:
+      model: ollama/qwen2.5:7b
+      api_base: http://ollama:11434
+
+  # ─── Voice embeddings (PII-safe; local) ────────────────────────────────────
+  - model_name: voice-embed
+    litellm_params:
+      model: ollama/nomic-embed-text
+      api_base: http://ollama:11434
+
+# Named-profile aliases consumed by code. Swap the model_name target here, not in code.
+router_settings:
+  routing_strategy: simple-shuffle
+  model_group_alias:
+    WRITER_MODEL:        writer-frontier
+    WRITER_LOCAL_MODEL:  writer-local
+    CLASSIFIER_MODEL:    classifier-fast
+    CLASSIFIER_LOCAL_MODEL: classifier-local
+    JUDGE_MODEL:         judge-balanced
+    VOICE_EMBED_MODEL:   voice-embed
+
+litellm_settings:
+  drop_params: true
+  set_verbose: false
+  telemetry: false
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

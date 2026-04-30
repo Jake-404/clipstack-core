@@ -1,0 +1,3 @@
+# Phase A.0 placeholder. Per-role task templates land here in A.2 once
+# task descriptions in crews/content_factory/tasks.py move out of inline
+# strings into versioned jinja2 files (so prompt changes show up in PR diffs).

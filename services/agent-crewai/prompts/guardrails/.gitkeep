@@ -1,0 +1,6 @@
+# Phase A.0 placeholder. Brand-safety guardrail fragments composed into
+# every agent's system prompt land here. Two are already locked:
+#   - profanity-block.j2 (Phase A.1, base rule)
+#   - cost-policy.j2     (the FREE / METERED / EXPENSIVE classes from CLAUDE.md)
+# Compliance-pack rules from signals/regulatory/ load through these templates
+# in Phase C.

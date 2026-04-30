@@ -1,0 +1,111 @@
+/* Doc 8 §5 — paste-ready. Token values exact, not suggestions. */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Light mode (designed second; mirrors dark) */
+    --bg-base: #FAFAF7;
+    --bg-subtle: #F2F1EC;
+    --bg-surface: #FFFFFF;
+    --bg-elevated: #FFFFFF;
+
+    --border-subtle: #ECEAE3;
+    --border-default: #DDDAD0;
+    --border-strong: #C4C0B5;
+
+    --text-primary: #14151A;
+    --text-secondary: #5C5F66;
+    --text-tertiary: #94979E;
+    --text-inverted: #FFFFFF;
+
+    --accent-50: #E6F4F3;
+    --accent-100: #CCEAE7;
+    --accent-200: #99D5CF;
+    --accent-300: #66BFB7;
+    --accent-400: #4FB1A8;
+    --accent-500: #3FA9A0;
+    --accent-600: #348B83;
+    --accent-700: #296D67;
+    --accent-800: #1F524D;
+    --accent-900: #143734;
+
+    --status-success: #3DC580;
+    --status-warning: #F2A93A;
+    --status-danger:  #E55B5B;
+    --status-info:    #5B8DE5;
+  }
+
+  .dark {
+    --bg-base:        #0B0C0E;
+    --bg-subtle:      #111216;
+    --bg-surface:     #16181C;
+    --bg-elevated:    #1C1E23;
+
+    --border-subtle:  #1F2127;
+    --border-default: #2A2D34;
+    --border-strong:  #3A3E47;
+
+    --text-primary:   #F2F2F0;
+    --text-secondary: #A1A4AA;
+    --text-tertiary:  #6B6F78;
+    --text-inverted:  #0B0C0E;
+
+    /* accent-* and status-* unchanged across modes */
+  }
+
+  html, body {
+    height: 100%;
+  }
+
+  body {
+    background-color: var(--bg-base);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    font-feature-settings: "cv11", "ss01"; /* Inter alternates that improve at small sizes */
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Selection */
+  ::selection {
+    background-color: var(--accent-500);
+    color: var(--text-inverted);
+  }
+
+  /* Focus ring (used everywhere — never disable per Doc 8 hard rule #7) */
+  *:focus-visible {
+    outline: 2px solid var(--accent-500);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  /* Scrollbar (subtle, dark-mode-aware) */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-default);
+    border-radius: 5px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--border-strong);
+  }
+}
+
+/* Reduced motion (Doc 8 §10.6) */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

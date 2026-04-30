@@ -1,0 +1,84 @@
+"""Content Factory crew assembly. Doc 1 §7.1.
+
+Sequential process: research → strategise → long-form → adapt-per-platform
++ newsletter in parallel → brand-QA. Returns a `Crew` object the caller
+can `kickoff(inputs=...)` once tools are wired (A.2).
+"""
+
+from __future__ import annotations
+
+from crewai import Crew, Process
+
+from .agents import (
+    make_brand_qa,
+    make_long_form_writer,
+    make_newsletter_adapter,
+    make_researcher,
+    make_social_adapter,
+    make_strategist,
+)
+from .tasks import (
+    task_brand_qa,
+    task_long_form,
+    task_newsletter_adapt,
+    task_research,
+    task_social_adapt,
+    task_strategise,
+)
+
+_VALID_PLATFORMS = {"x", "linkedin", "reddit", "tiktok", "instagram"}
+
+
+def build_content_factory_crew(
+    *,
+    company_id: str,
+    platforms: list[str],
+    source_type: str = "url",
+    source_value: str = "",
+) -> Crew:
+    """Assemble the crew. Phase A.0: builds without kicking off.
+
+    Pass the assembled crew to `crew.kickoff(inputs={...})` once you're ready
+    for live execution. Inputs are read by the Researcher's task description
+    via the templated source_type/source_value already baked at build time.
+    """
+    unknown = set(platforms) - _VALID_PLATFORMS
+    if unknown:
+        raise ValueError(
+            f"unknown platforms: {sorted(unknown)} (valid: {sorted(_VALID_PLATFORMS)})"
+        )
+
+    researcher = make_researcher()
+    strategist = make_strategist()
+    writer = make_long_form_writer()
+    newsletter = make_newsletter_adapter()
+    qa = make_brand_qa()
+
+    social_agents = {p: make_social_adapter(p) for p in platforms}
+
+    t_research = task_research(researcher, source_type, source_value)
+    t_strat = task_strategise(strategist, platforms, context=[t_research])
+    t_long = task_long_form(writer, context=[t_strat])
+    t_socials = [
+        task_social_adapt(social_agents[p], p, context=[t_long]) for p in platforms
+    ]
+    t_news = task_newsletter_adapt(newsletter, context=[t_long])
+    t_qa = task_brand_qa(qa, context=[t_long, *t_socials, t_news])
+
+    crew = Crew(
+        agents=[
+            researcher,
+            strategist,
+            writer,
+            *social_agents.values(),
+            newsletter,
+            qa,
+        ],
+        tasks=[t_research, t_strat, t_long, *t_socials, t_news, t_qa],
+        process=Process.sequential,
+        verbose=False,
+        memory=False,  # Persistent memory is `company_lessons` + Qdrant — not CrewAI-native.
+    )
+    # Tag for Langfuse traces (Phase B). company_id flows through inputs at kickoff.
+    crew.metadata = {"crew_id": "content_factory", "company_id": company_id}  # type: ignore[attr-defined]
+    return crew

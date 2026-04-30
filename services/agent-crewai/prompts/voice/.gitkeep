@@ -1,0 +1,8 @@
+# Phase A.0 placeholder.
+# Voice prompt fragments live here as jinja2 templates rendered by the BrandQA
+# agent. The actual voice corpus exemplars live in signals/voice-corpora/ —
+# this directory holds only the *templates* that compose the corpus into
+# system prompts.
+#
+# Schema (locked A.2):
+#   prompts/voice/{voice_seed.j2, voice_lessons_block.j2, voice_critic.j2}
