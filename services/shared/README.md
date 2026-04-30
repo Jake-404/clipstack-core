@@ -7,11 +7,15 @@ Cross-service contracts. Every service in `core/services/` reads from here so ty
 ```
 shared/
 ├── schemas/
-│   ├── company.ts       agent.ts       client.ts
-│   ├── lesson.ts        approval.ts    draft.ts
-│   ├── publish.ts       metering.ts    audit.ts
+│   ├── company.ts       agent.ts       lesson.ts
+│   ├── approval.ts      draft.ts       metering.ts
+│   ├── audit.ts         role.ts        permission.ts
 │   └── *.py             # 1:1 pydantic mirrors
-├── feature-flags.ts     # CRYPTO_ENABLED / EVENTBUS_ENABLED / BANDITS_ENABLED / SIGNALS_LOADED
+├── db/
+│   ├── migrations/      # 0001_init / 0002_enable_rls / 0003_rbac_seed
+│   ├── middleware.md    # how to set app.current_company_id per connection
+│   └── README.md        # tenant data model + RLS contract
+├── feature-flags.ts     # CRYPTO_ENABLED / EVENTBUS_ENABLED / BANDITS_ENABLED / SIGNALS_LOADED / AGENT_BUDGET_AUTONOMOUS
 ├── feature_flags.py     # Python mirror
 └── README.md
 ```
