@@ -5,13 +5,23 @@ per-workspace voice corpus stored in Qdrant). Returns a blended score in
 [0, 1] plus the top-3 most-similar and top-3 least-similar corpus exemplars
 so the writer can see *why* a draft scored where it did.
 
-Phase A.0 stub: returns score=1.0 (passes everything) and empty exemplars.
+A.2 wiring: when VOICE_SCORER_BASE_URL is set, the tool POSTs to
+{base}/score. Without it, falls back to score=1.0 / passes=true so crews
+construct cleanly in environments without the service live.
 """
 
 from __future__ import annotations
 
+import os
+
+import httpx
+import structlog
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
+
+log = structlog.get_logger()
+
+VOICE_SCORER_BASE_URL = os.getenv("VOICE_SCORER_BASE_URL")
 
 
 class VoiceScoreInput(BaseModel):
@@ -24,8 +34,8 @@ class VoiceScoreInput(BaseModel):
 class VoiceScoreResult(BaseModel):
     score: float = Field(..., ge=0.0, le=1.0)
     passes: bool
-    nearest: list[str]
-    farthest: list[str]
+    nearest: list[dict]
+    farthest: list[dict]
 
 
 class _VoiceScoreTool(BaseTool):
@@ -44,13 +54,55 @@ class _VoiceScoreTool(BaseTool):
         client_id: str | None = None,
         threshold: float = 0.65,
     ) -> dict:
-        # Phase A.0 stub — every draft passes. Real call lives at
-        # POST {VOICE_SCORER_URL}/score in A.2.
+        if not VOICE_SCORER_BASE_URL:
+            log.debug(
+                "voice_score.fallback_stub",
+                reason="VOICE_SCORER_BASE_URL not set",
+            )
+            return VoiceScoreResult(
+                score=1.0,
+                passes=True,
+                nearest=[],
+                farthest=[],
+            ).model_dump()
+
+        url = f"{VOICE_SCORER_BASE_URL.rstrip('/')}/score"
+        body = {
+            "company_id": company_id,
+            "draft": draft,
+            "threshold": threshold,
+            "client_id": client_id,
+            "return_exemplars": True,
+        }
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                resp = client.post(url, json=body)
+        except (httpx.HTTPError, OSError) as e:
+            log.warning("voice_score.http_error", error=str(e), url=url)
+            # Degrade gracefully: a service outage shouldn't crash the crew.
+            # Fail-open returns score=1.0 — if voice-scoring is critical for
+            # this workspace, surface the outage in the UI rather than
+            # blocking every draft on the agent side.
+            return VoiceScoreResult(
+                score=1.0, passes=True, nearest=[], farthest=[]
+            ).model_dump()
+
+        if resp.status_code != 200:
+            log.warning(
+                "voice_score.bad_status",
+                status=resp.status_code,
+                body=resp.text[:200],
+            )
+            return VoiceScoreResult(
+                score=1.0, passes=True, nearest=[], farthest=[]
+            ).model_dump()
+
+        data = resp.json()
         return VoiceScoreResult(
-            score=1.0,
-            passes=True,
-            nearest=[],
-            farthest=[],
+            score=data.get("score", 1.0),
+            passes=bool(data.get("passes", True)),
+            nearest=list(data.get("nearest", [])),
+            farthest=list(data.get("farthest", [])),
         ).model_dump()
 
 
