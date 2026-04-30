@@ -54,3 +54,85 @@ export async function resolveSession(): Promise<SessionContext> {
 
   throw new ApiError("unauthorized", "no session — auth stub not configured");
 }
+
+// ─── Service-token authentication ──────────────────────────────────────────
+//
+// Used by the agent-crewai + agent-langgraph services to call the API on a
+// specific workspace's behalf. NOT available to user-facing surfaces.
+//
+// Headers:
+//   X-Clipstack-Service-Token: <secret>     (must match SERVICE_TOKEN env var)
+//   X-Clipstack-Active-Company: <uuid>      (the workspace this call serves)
+//
+// The token is shared between the API and the agent services. Rotate via env
+// var update; A.3 introduces per-service token rotation tracked in audit_log.
+
+export interface ServiceContext {
+  kind: "service";
+  service: string;            // e.g. "agent-crewai"
+  activeCompanyId: string;
+  authenticatedAt: string;
+}
+
+/**
+ * Try to resolve a service-token context. Returns null when no service-token
+ * header is present (caller should fall back to user-session resolution).
+ * Throws on partial / invalid headers — never silently downgrade.
+ */
+export function resolveServiceContext(headers: Headers): ServiceContext | null {
+  const presented = headers.get("x-clipstack-service-token");
+  if (!presented) return null;
+
+  const expected = process.env.SERVICE_TOKEN;
+  if (!expected) {
+    // Service token sent but server isn't configured — fail closed.
+    throw new ApiError("forbidden", "service tokens are not enabled on this deployment");
+  }
+  if (!constantTimeEqual(presented, expected)) {
+    throw new ApiError("forbidden", "invalid service token");
+  }
+
+  const companyHeader = headers.get("x-clipstack-active-company");
+  if (!companyHeader) {
+    throw new ApiError(
+      "bad_request",
+      "service-token requests must include X-Clipstack-Active-Company",
+    );
+  }
+  if (!UUID_RE.test(companyHeader)) {
+    throw new ApiError("bad_request", "X-Clipstack-Active-Company must be a UUID");
+  }
+
+  const service = headers.get("x-clipstack-service-name") ?? "unknown-service";
+
+  return {
+    kind: "service",
+    service,
+    activeCompanyId: companyHeader,
+    authenticatedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Resolve either a service-token context or a user session, in that order.
+ * Use this on routes that the agent services need to call.
+ */
+export async function resolveServiceOrSession(
+  headers: Headers,
+): Promise<SessionContext | ServiceContext> {
+  const service = resolveServiceContext(headers);
+  if (service) return service;
+  return resolveSession();
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Constant-time string compare to prevent token-timing attacks. */
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let acc = 0;
+  for (let i = 0; i < a.length; i++) {
+    acc |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return acc === 0;
+}
