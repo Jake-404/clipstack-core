@@ -1,8 +1,8 @@
-"""The six roles of the Content Factory crew (Doc 1 §7.1).
+"""The seven roles of the Content Factory crew (Doc 1 §7.1 + Doc 5 §1.6).
 
 Each agent gets a LiteLLM-routed model, a focused tool set, and a
 goal/backstory tuned to its function in the pipeline. Brand voice and
-editorial-memory tools are wired in A.2 — Phase A.0 wires the no-op
+editorial-memory tools are wired in A.2 — Phase A.0/A.1 wires the no-op
 tool stubs from `tools/` so the crew constructs cleanly.
 """
 
@@ -17,6 +17,7 @@ from models import (
     llm_kwargs,
 )
 from tools.asset_search import asset_search_tool
+from tools.brand_safety_check import brand_safety_check_tool
 from tools.claim_verifier import claim_verifier_tool
 from tools.hashtag_intel import hashtag_intel_tool
 from tools.pay_and_fetch import pay_and_fetch_tool
@@ -170,21 +171,33 @@ def make_devils_advocate_qa() -> Agent:
 
 
 def make_brand_qa() -> Agent:
-    """The voice-fingerprint critic (USP 3). Phase A.0 ships the role; the
-    SetFit-backed `voice_score` becomes a real call in A.2."""
+    """The voice-fingerprint + brand-safety critic. USP 3 + plan open-Q #3.
+    Phase A.0/A.1 ships the role; `voice_score` and `brand_safety_check`
+    real backends land in A.2 (SetFit corpus + regex/LLM scanner)."""
     return Agent(
         role="BrandQA",
         goal=(
-            "Validate every adapted draft against the brand voice corpus, the "
-            "company's claim list, and the prohibited-terms list. Score with "
-            "`voice_score`; verify factual claims with `claim_verifier`. Block "
-            "any draft below the workspace voice-score threshold."
+            "Validate every adapted draft against (a) the brand voice corpus "
+            "via `voice_score`, (b) factual claim provenance via `claim_verifier`, "
+            "(c) brand-safety + active regulatory regimes via `brand_safety_check`, "
+            "and (d) workspace lessons via `recall_lessons`. Block any draft "
+            "below the voice threshold OR with an unverified claim OR with a "
+            "brand-safety finding of severity='block' OR contradicting a "
+            "captured `forever`-scoped lesson."
         ),
         backstory=(
             "You're the last reviewer before a piece goes to a human approver. "
-            "You don't write. You don't strategise. You catch what shouldn't ship."
+            "You don't write. You don't strategise. You catch what shouldn't ship — "
+            "off-voice copy, drifted citations, regulated claims missing their "
+            "disclosure block, blocklisted terms, lessons this team has already "
+            "learned the hard way."
         ),
-        tools=[voice_score_tool, claim_verifier_tool, recall_lessons_tool],
+        tools=[
+            voice_score_tool,
+            claim_verifier_tool,
+            brand_safety_check_tool,
+            recall_lessons_tool,
+        ],
         llm=_judge(),
         allow_delegation=False,
         verbose=False,

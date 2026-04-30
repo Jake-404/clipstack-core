@@ -128,18 +128,23 @@ def task_brand_qa(qa: Agent, context: list[Task]) -> Task:
             "draft it marked 'block' fails immediately. Any 'revise' findings "
             "must be either (a) fixed in your output verdict's revision notes "
             "or (b) escalated to BLOCK if you can't see how to fix.\n\n"
-            "Then score every adapted draft against the brand voice corpus "
-            "via `voice_score`. Verify every cited claim via `claim_verifier`. "
-            "Recall lessons via `recall_lessons` to check the workspace's "
-            "history of corrections.\n\n"
+            "Then run the four-tool pass on every adapted draft:\n"
+            "  1. `voice_score`         — vs. workspace brand corpus\n"
+            "  2. `claim_verifier`      — every cited URL still supports its claim\n"
+            "  3. `brand_safety_check`  — profanity / blocklist / competitor / "
+            "regulated-claim shapes for active regimes; `severity='block'` "
+            "fails the draft, `disclosure_required` adds a disclosure block\n"
+            "  4. `recall_lessons`      — workspace history of corrections\n\n"
             "Final verdict per draft: PASS (devil's advocate cleared, voice "
-            "above threshold, all claims verified, no lesson violations), "
-            "REVISE (fixable issues with concrete instructions), or BLOCK."
+            "above threshold, all claims verified, no brand-safety blocks, "
+            "no lesson contradictions), REVISE (fixable with concrete "
+            "instructions including any required disclosure blocks), or BLOCK."
         ),
         agent=qa,
         context=context,
         expected_output=(
-            "Verdict (PASS|REVISE|BLOCK) + per-draft voice_score + claim "
-            "verdicts + DevilsAdvocate harm_risk passthrough + revision notes."
+            "Verdict (PASS|REVISE|BLOCK) per draft + voice_score + claim "
+            "verdicts + brand_safety findings + required disclosures + "
+            "DevilsAdvocate harm_risk passthrough + revision notes."
         ),
     )

@@ -7,7 +7,7 @@ CrewAI role-based pipelines for Clipstack core. **Phase A.0 skeleton — all too
 - `main.py` — FastAPI on `:8001` with `/health`, `/crews`, `/crews/content_factory/kickoff`
 - `models.py` — LiteLLM named-profile loader (`WRITER_MODEL` / `CLASSIFIER_MODEL` / `JUDGE_MODEL` / `VOICE_EMBED_MODEL`)
 - `crews/content_factory/` — Doc 1 §7.1 sequential pipeline: `Researcher → Strategist → LongFormWriter → SocialAdapter(per-platform) → NewsletterAdapter → DevilsAdvocateQA → BrandQA` (DevilsAdvocateQA added A.1 per Doc 5 §1.6 — adversarial review above claim verification)
-- `tools/` — seven tools: `recall_lessons` / `retrieve_high_performers` / `voice_score` / `asset_search` / `pay_and_fetch` / `claim_verifier` / `hashtag_intel` (all stubs)
+- `tools/` — eight tools: `recall_lessons` / `retrieve_high_performers` / `voice_score` / `brand_safety_check` / `asset_search` / `pay_and_fetch` / `claim_verifier` / `hashtag_intel` (all stubs; backends wired in A.2 onward)
 
 The crew constructs cleanly in `CREWAI_DRY_RUN=1` (default) without external LLM calls — it validates wiring, returns a `trace_id`, and parks. Live execution lands in A.2.
 
@@ -15,8 +15,8 @@ The crew constructs cleanly in `CREWAI_DRY_RUN=1` (default) without external LLM
 
 | Phase | Work |
 |---|---|
-| **A.1** | ✅ DevilsAdvocateQA crew member (Doc 5 §1.6) — adversarial review of every adapted draft, feeds BrandQA |
-| **A.2** | `voice_score` (SetFit + corpus), `retrieve_high_performers` (post_metrics + content_embeddings), USP 5 enforcement on rationale |
+| **A.1** | ✅ DevilsAdvocateQA crew member (Doc 5 §1.6) — adversarial review feeds BrandQA. ✅ `brand_safety_check` tool wired into BrandQA — pre-publish profanity / competitor / regulated-claim gate (plan open-Q #3). |
+| **A.2** | `voice_score` (SetFit + corpus), `retrieve_high_performers` (post_metrics + content_embeddings), `brand_safety_check` regex+LLM backend, USP 5 enforcement on rationale |
 | **A.3** | 8 more crews: `social_listener`, `weekly_report`, `brand_qa` (standalone), `engagement`, `lifecycle`, `trend_detector`, `algorithm_probe`, `live_event_monitor` |
 | **B**  | `claim_verifier` (USP 8 provenance) |
 | **5.1**| `pay_and_fetch` (USP-C1 x402 outbound) |
