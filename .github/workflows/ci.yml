@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [agent-crewai, agent-langgraph, pii-detection]
+        service: [agent-crewai, agent-langgraph, pii-detection, output-moderation]
     defaults:
       run:
         working-directory: services/${{ matrix.service }}
