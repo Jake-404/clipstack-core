@@ -7,6 +7,7 @@ export * from "./audit";
 export * from "./companies";
 export * from "./content-claims";
 export * from "./content-embeddings";
+export * from "./draft-revisions";
 export * from "./drafts";
 export * from "./enums";
 export * from "./lessons";
