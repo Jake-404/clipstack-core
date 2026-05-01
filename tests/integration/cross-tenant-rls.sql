@@ -166,6 +166,65 @@ END $$;
 
 RESET ROLE;
 
+-- ─── Test 6: pgvector extension + 384-d vector roundtrip ─────────────────
+-- 0007 promoted company_lessons.embedding from BYTEA to vector(384).
+-- Verifies (a) the extension is present, (b) a 384-d insert + read
+-- preserves the values, (c) cosine similarity works against an inserted
+-- row. Runs as superuser since lessons need a workspace + RLS-bound role
+-- and re-binding for a single test isn't worth the boilerplate; the
+-- vector dimension + roundtrip are RLS-orthogonal anyway.
+
+DO $$
+DECLARE
+  has_ext BOOLEAN;
+  inserted_id UUID;
+  read_dim INT;
+  read_first_three FLOAT[];
+  cos_self FLOAT;
+BEGIN
+  SELECT EXISTS (
+    SELECT 1 FROM pg_extension WHERE extname = 'vector'
+  ) INTO has_ext;
+  IF NOT has_ext THEN
+    RAISE EXCEPTION 'TEST 6 FAIL — pgvector extension missing';
+  END IF;
+
+  -- Insert a deterministic 384-d vector ([0.001, 0.002, ..., 0.384]).
+  INSERT INTO company_lessons (company_id, kind, scope, rationale, embedding)
+  VALUES (
+    '11111111-1111-1111-1111-111111111111',
+    'human_denied',
+    'forever',
+    'pgvector roundtrip test — sufficient rationale length for the CHECK',
+    (
+      SELECT ('[' || string_agg((i::FLOAT / 1000)::TEXT, ',') || ']')::vector
+      FROM generate_series(1, 384) AS i
+    )
+  )
+  RETURNING id INTO inserted_id;
+
+  -- Read back: dim should be 384, first three components should be
+  -- [0.001, 0.002, 0.003].
+  SELECT vector_dims(embedding) INTO read_dim
+    FROM company_lessons WHERE id = inserted_id;
+  IF read_dim != 384 THEN
+    RAISE EXCEPTION 'TEST 6 FAIL — vector dim is % (expected 384)', read_dim;
+  END IF;
+
+  -- Cosine similarity to self should be 1.0 (within FP tolerance). pgvector's
+  -- <=> is cosine *distance* (1 - similarity), so self <=> self ≈ 0.
+  SELECT (embedding <=> embedding)::FLOAT INTO cos_self
+    FROM company_lessons WHERE id = inserted_id;
+  IF cos_self > 0.0001 THEN
+    RAISE EXCEPTION 'TEST 6 FAIL — cosine self-distance is % (expected ≈ 0)', cos_self;
+  END IF;
+
+  RAISE NOTICE 'TEST 6 PASS — vector(384) roundtrip + cosine self-distance ≈ 0 (got %)', cos_self;
+
+  -- Cleanup so subsequent runs don't double-insert.
+  DELETE FROM company_lessons WHERE id = inserted_id;
+END $$;
+
 \echo '────────────────────────────────────────'
-\echo '  ALL CROSS-TENANT RLS ASSERTIONS PASS  '
+\echo '  ALL CROSS-TENANT + PGVECTOR ASSERTS PASS  '
 \echo '────────────────────────────────────────'

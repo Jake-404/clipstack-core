@@ -1,32 +1,16 @@
 // company_lessons — USP 5 editorial memory.
-// `embedding` is bytea in A.1 (pgvector fallback path); A.2 alters to
-// `vector(384)` once we verify pgvector is installed in the deployment.
-// Until then, callers store the raw f32 array as bytes; recall_lessons
-// HTTP service decodes when reading.
+// `embedding` is `vector(384)` since 0007_alter_embedding_to_vector.sql.
+// recall_lessons + USP 1 cosine-similarity surfaces query against the
+// ivfflat index built in that migration.
 
-import { customType, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
 import { agents } from "./agents";
 import { companies } from "./companies";
 import { lessonKindEnum, lessonScopeEnum } from "./enums";
 import { users } from "./users";
-
-// Drizzle ships bytea in pg-core but the type isn't named — define a custom
-// type to match the SQL column.
-const bytea = customType<{ data: Uint8Array; default: false; notNull: false }>({
-  dataType() {
-    return "bytea";
-  },
-  toDriver(value: Uint8Array) {
-    return Buffer.from(value);
-  },
-  fromDriver(value: unknown) {
-    if (value instanceof Buffer) return new Uint8Array(value);
-    if (value instanceof Uint8Array) return value;
-    return new Uint8Array();
-  },
-});
+import { vector384 } from "./_vector";
 
 export const companyLessons = pgTable("company_lessons", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -43,7 +27,7 @@ export const companyLessons = pgTable("company_lessons", {
     .array()
     .notNull()
     .default(sql`ARRAY[]::TEXT[]`),
-  embedding: bytea("embedding"),
+  embedding: vector384("embedding"),
   capturedByUserId: uuid("captured_by_user_id").references(() => users.id, {
     onDelete: "set null",
   }),
