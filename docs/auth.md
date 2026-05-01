@@ -96,9 +96,25 @@ When `NODE_ENV=production`:
 - Missing `WORKOS_API_KEY` / `WORKOS_CLIENT_ID` / `SESSION_COOKIE_SECRET` causes the auth routes to return 500.
 - Cookie `secure` flag flips on automatically.
 
+## Auto-provisioning (sprint-close addition)
+
+When `WORKOS_AUTO_PROVISION=1` and the WorkOS callback can't find a matching local `users` row, the platform auto-creates:
+
+1. A `users` row with `workos_user_id` + `email` + `name` from the WorkOS user
+2. A solo `companies` row with `type='solo'` and `name='<display>'s workspace'`
+3. The owner role for that company (the `0003_rbac_seed` trigger creates all four default roles automatically on company insert)
+4. A `memberships` row linking user → company → owner role
+5. An `audit_log` row of kind `auth.user.provisioned`
+
+**Default**: `WORKOS_AUTO_PROVISION` defaults to `'1'` when `NODE_ENV !== "production"` and `'0'` in production. Lets local dev work without manually seeding rows; keeps production fail-closed until an onboarding flow takes over the new-user path.
+
+**To disable in dev**: set `WORKOS_AUTO_PROVISION=0` explicitly.
+
+**To enable in production**: set `WORKOS_AUTO_PROVISION=1` (only when onboarding has been validated).
+
 ## What this slice does NOT include
 
-- **New-user provisioning.** The callback fails closed when no `users` row matches the WorkOS user. Onboarding (auto-create row + assign starter membership + workspace seeding) is its own slice.
+- **Email-domain workspace mapping.** Auto-provision creates a *solo* workspace per user. Mapping `*@acme.com` to an existing acme workspace is a separate config table that lands when the first design partner needs it.
 - **Multi-workspace switching.** Picks the latest non-revoked membership; the user can't currently choose between workspaces. UI for that lands when a user has >1 active membership in the wild.
 - **MFA enforcement.** WorkOS handles MFA at the Authkit step. The local `users.mfa_enrolled_at` column is written-but-not-read; A.1 P0 enforcement (must-MFA-for-admin-roles) lands later.
 - **Service-token rotation.** That's a separate path, already lives in `lib/api/auth.ts:resolveServiceContext`. WorkOS doesn't touch it.

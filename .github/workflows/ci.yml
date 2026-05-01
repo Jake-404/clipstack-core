@@ -15,7 +15,7 @@ jobs:
       - run: ./scripts/check-core-isolation.sh
 
   ui-typecheck:
-    name: approval-ui typecheck
+    name: approval-ui typecheck + build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -32,6 +32,17 @@ jobs:
           cache-dependency-path: services/approval-ui/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
+      # `next build` catches a class of issues `tsc --noEmit` doesn't:
+      # typedRoutes mismatches, page-data collection invoking module load,
+      # stricter end-to-end import resolution. Two such bugs slipped past
+      # typecheck in A.2 and were caught only on a local `pnpm build` —
+      # this step closes that gap at PR time.
+      - name: Build (server)
+        env:
+          # Build-time deps (none currently — DB/WorkOS are lazy). If a
+          # future surface needs a build-time secret we plumb it here.
+          NODE_ENV: production
+        run: pnpm build
 
   python-lint:
     name: python services lint

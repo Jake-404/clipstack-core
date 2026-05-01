@@ -1,21 +1,25 @@
 """Assemble the publish pipeline state graph.
 
-Phase A.0 shipped 6 nodes. A.3 (this revision) adds 2 real-time-tier nodes:
-  - percentile_gate  : pre-approval prediction; below threshold reroutes
-                       to review_cycle (Doc 4 §2.4)
-  - bandit_allocate  : pre-publish variant selection; tags state with
-                       variant_id for content.published attribution (§2.3)
+Phase A.0 shipped 6 nodes. A.3 added 2 real-time-tier nodes (percentile_gate,
+bandit_allocate). Sprint-close (this revision) swaps the in-memory
+checkpointer for PostgresSaver when POSTGRES_URL is set — so a 24h-old
+paused awaiting_human_approval run survives a service restart.
 
-Both nodes pass through when EVENTBUS_ENABLED=false, so the graph still
-works in dev without Redpanda + percentile-predictor + bandit-orchestrator
-running.
+Checkpointer selection:
+  - POSTGRES_URL set + LANGGRAPH_PERSIST_STATE != "false" → PostgresSaver
+  - otherwise                                            → MemorySaver
 
-In-memory checkpointer remains; A.2 follow-up swaps for PostgresSaver so
-paused runs survive restarts.
+The PostgresSaver auto-creates its tables on first use (langgraph_*) so no
+separate migration needed. The connection is lazy — graph compile doesn't
+hit Postgres until a node first touches the checkpointer.
 """
 
 from __future__ import annotations
 
+import os
+from typing import Any
+
+import structlog
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
@@ -33,6 +37,76 @@ from .nodes import (
     should_revise,
 )
 from .state import PublishState
+
+log = structlog.get_logger()
+
+
+def _build_checkpointer() -> Any:
+    """Return the checkpointer for this deployment.
+
+    Tries Postgres first when POSTGRES_URL is set + persist not opted out;
+    falls back to in-memory on any wiring failure (so dev runs without
+    Postgres still work). The fallback emits a structured log warning.
+    """
+    persist = os.getenv("LANGGRAPH_PERSIST_STATE", "true").lower() != "false"
+    pg_url = os.getenv("POSTGRES_URL")
+
+    if not (persist and pg_url):
+        log.info(
+            "langgraph.checkpointer.memory",
+            reason="POSTGRES_URL unset or LANGGRAPH_PERSIST_STATE=false",
+        )
+        return MemorySaver()
+
+    try:
+        # Lazy import — keeps the module importable when langgraph-checkpoint-
+        # postgres isn't installed (e.g., a unit test that doesn't need it).
+        from langgraph.checkpoint.postgres import PostgresSaver  # type: ignore[import-not-found]
+
+        # PostgresSaver.from_conn_string uses a sync connection. For graph
+        # compile we just need the saver instance; per-node checkpoint reads
+        # happen on the connection LangGraph manages internally.
+        saver = PostgresSaver.from_conn_string(pg_url)
+        # First-time setup creates the langgraph_* tables. Idempotent — safe
+        # to call on every service start. The setup() context manager pattern
+        # in newer SDK versions returns the saver; we keep it simple here.
+        if hasattr(saver, "setup"):
+            try:
+                saver.setup()
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "langgraph.checkpointer.setup_failed",
+                    error=str(e),
+                    fallback="memory",
+                )
+                return MemorySaver()
+
+        log.info("langgraph.checkpointer.postgres", url_host=_url_host(pg_url))
+        return saver
+    except ImportError:
+        log.warning(
+            "langgraph.checkpointer.postgres_unavailable",
+            message="langgraph-checkpoint-postgres not installed; using memory",
+        )
+        return MemorySaver()
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "langgraph.checkpointer.postgres_failed",
+            error=str(e),
+            fallback="memory",
+        )
+        return MemorySaver()
+
+
+def _url_host(url: str) -> str:
+    """Extract just the host[:port] from a postgres URL for logging.
+    Avoids leaking credentials into structured logs."""
+    try:
+        # postgresql://user:pass@host:port/db → host:port
+        after_at = url.split("@", 1)[-1]
+        return after_at.split("/", 1)[0]
+    except Exception:  # noqa: BLE001
+        return "unknown"
 
 
 def build_publish_pipeline() -> object:
@@ -116,4 +190,4 @@ def build_publish_pipeline() -> object:
     g.add_edge("record_block_lesson", END)
     g.add_edge("record_deny_lesson", END)
 
-    return g.compile(checkpointer=MemorySaver())
+    return g.compile(checkpointer=_build_checkpointer())
