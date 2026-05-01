@@ -12,7 +12,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# mabwiser + numpy land here when Thompson sampling wires (later A.3 slice).
+# Stdlib `random.betavariate` covers vanilla Thompson sampling at K≈3-5
+# arms, so the base service has no ML dep. The `ml` extra unlocks
+# contextual bandits (mabwiser) when we need per-feature arm allocation
+# (e.g. time-of-day-aware variant selection). Not required for the
+# default Thompson path.
 ml = [
   "mabwiser>=2.7.0",
   "numpy>=1.26.0",

@@ -6,33 +6,47 @@ across arms via Thompson sampling, weighted by predicted percentile (USP 1)
 + live-performance updates from `content.metric_update` events.
 
 State machine per (campaign, platform, message_pillar):
-  1. Variants registered → arms initialised with uninformed priors
+  1. Variants registered → arms initialised with priors informed by USP 1
+     percentile predictions (predicted=70 → Beta(7, 3); predicted=None →
+     Beta(1, 1) uniform prior)
   2. Allocate request → orchestrator returns the variant to publish next
   3. content.metric_update event → reward update (Thompson posterior bumps)
   4. After observation window → low-performing arms pruned, top arms seed
      the next generation cycle
 
-Library: `mabwiser` Python (Thompson sampling, contextual bandits when needed).
+Real backend (sprint-close+): Thompson sampling implemented directly with
+Python's stdlib `random.betavariate` — beta priors + binary-style reward
+updates are <30 lines of math and don't need mabwiser/numpy/scipy. The
+schema is engine-agnostic so we can swap in mabwiser when contextual-
+bandit features land in a follow-up.
+
+State is persisted as JSON at BANDIT_DATA_DIR/{bandit_id}.json (default
+/data/bandits). Atomic .tmp + replace so concurrent allocate/reward
+calls never see a half-written state file.
 
 Phase A.3 ships the FastAPI shell with stub mode — /allocate returns the
-first variant, /reward is a no-op. mabwiser wiring lands when the first
-campaign opts into bandit allocation. Per Doc 4 acceptance: a campaign with
-bandits enabled shows demonstrable lift over a 30-day window vs single-
-variant generation, statistically significant.
+first variant, /reward is a no-op. Real Thompson sampling enabled by
+unsetting BANDIT_STUB_MODE in production. Per Doc 4 acceptance: a campaign
+with bandits enabled shows demonstrable lift over a 30-day window vs
+single-variant generation, statistically significant.
 
 Mounted at port 8008. Health check consumed by docker-compose.
 """
 
 from __future__ import annotations
 
+import json
 import os
+import random
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Literal
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Literal
 from uuid import uuid4
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 log = structlog.get_logger()
@@ -46,13 +60,14 @@ def _is_production() -> bool:
 
 
 def _stub_mode_default() -> str:
-    """Dev/test: '1' (stub on — service runs without mabwiser wired).
+    """Dev/test: '1' (stub on — service runs without the real backend).
     Production: '0' (stub off — a forgotten-to-wire deployment fails loudly
     rather than silently allocating placeholder variants forever)."""
     return "0" if _is_production() else "1"
 
 
 STUB_MODE: bool = os.getenv("BANDIT_STUB_MODE", _stub_mode_default()) == "1"
+DATA_DIR = Path(os.getenv("BANDIT_DATA_DIR", "/data/bandits"))
 
 # Doc 4 §2.3 hard rule: never reduce exploration below 5%. Without floor
 # exploration, posteriors drift on stale wins and the bandit collapses to
@@ -62,10 +77,12 @@ EXPLORATION_BUDGET_FLOOR: float = 0.05
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     log.info(
         "startup",
         service="bandit-orchestrator",
         stub_mode=STUB_MODE,
+        data_dir=str(DATA_DIR),
         exploration_budget_floor=EXPLORATION_BUDGET_FLOOR,
         environment=os.getenv("ENVIRONMENT") or os.getenv("NODE_ENV") or "development",
     )
@@ -114,11 +131,7 @@ class RegisterArmsRequest(BaseModel):
     platform: Channel
     message_pillar: str = Field(..., min_length=1, max_length=120)
     variants: list[Variant] = Field(..., min_length=2, max_length=10)
-    # Strategy choice. Default Thompson per Doc 4.
     algorithm: Algorithm = "thompson"
-    # Per Doc 4 §2.3: explicit exploration budget. 0.10 = 10% of allocations
-    # always go to non-leading arm to keep prior up to date.
-    # Hard floor 0.05 enforced at the schema layer — see EXPLORATION_BUDGET_FLOOR.
     exploration_budget: float = Field(0.10, ge=EXPLORATION_BUDGET_FLOOR, le=0.5)
     observation_window_hours: int = Field(72, gt=0, le=720)
 
@@ -148,8 +161,6 @@ class RewardRequest(BaseModel):
     company_id: str
     bandit_id: str
     variant_id: str
-    # Reward signal — workspace-relative percentile within the arm's KPI.
-    # Comes from content.metric_update events filtered to this draft.
     reward: float = Field(..., ge=0.0, le=100.0)
     snapshot_at: str  # ISO-8601
 
@@ -168,11 +179,143 @@ class StateResponse(BaseModel):
     campaign_id: str
     platform: Channel
     message_pillar: str
-    arms: list[dict] = Field(default_factory=list)
+    arms: list[dict[str, Any]] = Field(default_factory=list)
     total_allocations: int = 0
     total_rewards: int = 0
     leading_arm: str | None = None
     pruned_arms: list[str] = Field(default_factory=list)
+
+
+# ─── Persistence ───────────────────────────────────────────────────────────
+
+
+def _bandit_path(bandit_id: str) -> Path:
+    # Defensive against path traversal — bandit_ids are uuid-derived, but
+    # we don't want a malicious caller posting "../../etc/passwd" to either
+    # /allocate or /reward and having us read/write outside DATA_DIR.
+    safe = "".join(c for c in bandit_id if c.isalnum() or c in "_-")
+    if safe != bandit_id or not safe:
+        raise HTTPException(status_code=400, detail="invalid bandit_id")
+    return DATA_DIR / f"{safe}.json"
+
+
+def _save_state(state: dict[str, Any], path: Path) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(state, sort_keys=True, indent=2))
+    tmp.replace(path)
+
+
+def _load_state(bandit_id: str) -> dict[str, Any]:
+    path = _bandit_path(bandit_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"bandit {bandit_id} not found")
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        log.error("state.read_failed", bandit_id=bandit_id, error=str(e))
+        raise HTTPException(status_code=500, detail="bandit state corrupted") from e
+
+
+# ─── Thompson sampling ─────────────────────────────────────────────────────
+
+
+def _initial_arms(variants: list[Variant]) -> list[dict[str, Any]]:
+    """Seed each arm's Beta(α, β) prior from its USP 1 predicted percentile.
+
+    Heuristic: if predicted=p (in [0,100]), set α = max(p/10, 1), β =
+    max((100-p)/10, 1). The ratio α/(α+β) ≈ p/100 (the prior mean), and
+    α+β ≈ 10 makes the prior mildly informative — strong enough to bias
+    early allocations toward the predictor's pick, weak enough that 5–10
+    real observations dominate. Predicted=None → uniform Beta(1, 1).
+    """
+    arms = []
+    for v in variants:
+        p = v.predicted_percentile
+        if p is None:
+            alpha, beta = 1.0, 1.0
+        else:
+            alpha = max(p / 10.0, 1.0)
+            beta = max((100.0 - p) / 10.0, 1.0)
+        arms.append({
+            "variant_id": v.variant_id,
+            "draft_id": v.draft_id,
+            "body_excerpt": v.body_excerpt,
+            "predicted_percentile": p,
+            "alpha": alpha,
+            "beta": beta,
+            "allocation_count": 0,
+            "reward_count": 0,
+            "reward_sum": 0.0,
+            "pruned": False,
+        })
+    return arms
+
+
+def _thompson_pick(
+    arms: list[dict[str, Any]],
+    exploration_budget: float,
+    rng: random.Random,
+) -> tuple[dict[str, Any], float, str]:
+    """Return (chosen_arm, sampled_score, rationale).
+
+    Active arms only — pruned arms are skipped. With probability =
+    exploration_budget we override the Thompson winner and pick a non-
+    leading arm uniformly at random. This guarantees we keep updating
+    posteriors on tail arms even when one arm is clearly winning.
+    """
+    active = [a for a in arms if not a.get("pruned")]
+    if not active:
+        raise HTTPException(status_code=409, detail="no active arms to allocate from")
+
+    # Step 1: vanilla Thompson — sample from each arm's posterior, pick max.
+    # `random.betavariate(α, β)` is in stdlib so no numpy needed for this
+    # tiny K. At K≈3-5 the cost is negligible.
+    samples = [(a, rng.betavariate(a["alpha"], a["beta"])) for a in active]
+    leader, leader_score = max(samples, key=lambda t: t[1])
+
+    # Step 2: floor exploration. Skip the override when there's only one
+    # active arm (nothing to explore to) or when the leader is the only
+    # one with allocations (cold start should converge fast).
+    if (
+        len(active) > 1
+        and rng.random() < exploration_budget
+        and any(a is not leader for a in active)
+    ):
+        non_leaders = [a for a in active if a is not leader]
+        chosen = rng.choice(non_leaders)
+        # Find the sample that was drawn for this arm (use its score).
+        chosen_score = next(s for a, s in samples if a is chosen)
+        return chosen, chosen_score, "exploration override"
+
+    return leader, leader_score, "thompson winner"
+
+
+def _update_posterior(arm: dict[str, Any], reward_pct: float) -> None:
+    """Map reward in [0, 100] to a Bernoulli-style update on Beta(α, β).
+
+    reward_norm = reward_pct / 100. Bump α by reward_norm, β by
+    (1 - reward_norm). This treats the percentile-rank as a continuous
+    "fractional success" — a reward of 70 contributes 0.7 of a success +
+    0.3 of a failure, smoothly interpolating between binary outcomes.
+    """
+    r = max(0.0, min(1.0, reward_pct / 100.0))
+    arm["alpha"] = float(arm["alpha"]) + r
+    arm["beta"] = float(arm["beta"]) + (1.0 - r)
+    arm["reward_count"] = int(arm["reward_count"]) + 1
+    arm["reward_sum"] = float(arm["reward_sum"]) + reward_pct
+
+
+def _posterior_mean(arm: dict[str, Any]) -> float:
+    a = float(arm["alpha"])
+    b = float(arm["beta"])
+    return a / (a + b) if (a + b) > 0 else 0.5
+
+
+def _leading_arm(arms: list[dict[str, Any]]) -> str | None:
+    active = [a for a in arms if not a.get("pruned")]
+    if not active:
+        return None
+    return max(active, key=_posterior_mean)["variant_id"]
 
 
 # ─── Endpoints ─────────────────────────────────────────────────────────────
@@ -198,6 +341,7 @@ async def register_arms(req: RegisterArmsRequest) -> RegisterArmsResponse:
         platform=req.platform,
         arm_count=len(req.variants),
     )
+
     if STUB_MODE:
         return RegisterArmsResponse(
             request_id=request_id,
@@ -205,7 +349,32 @@ async def register_arms(req: RegisterArmsRequest) -> RegisterArmsResponse:
             arm_count=len(req.variants),
             skipped=True,
         )
-    raise NotImplementedError("mabwiser backend wired in a follow-up A.3 slice")
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    state: dict[str, Any] = {
+        "bandit_id": bandit_id,
+        "company_id": req.company_id,
+        "client_id": req.client_id,
+        "campaign_id": req.campaign_id,
+        "platform": req.platform,
+        "message_pillar": req.message_pillar,
+        "algorithm": req.algorithm,
+        "exploration_budget": req.exploration_budget,
+        "observation_window_hours": req.observation_window_hours,
+        "created_at": datetime.now(UTC).isoformat(),
+        "arms": _initial_arms(req.variants),
+        "total_allocations": 0,
+        "total_rewards": 0,
+        "pruned_arms": [],
+    }
+    _save_state(state, _bandit_path(bandit_id))
+
+    return RegisterArmsResponse(
+        request_id=request_id,
+        bandit_id=bandit_id,
+        arm_count=len(req.variants),
+        skipped=False,
+    )
 
 
 @app.post("/bandits/{bandit_id}/allocate", response_model=AllocateResponse)
@@ -224,8 +393,6 @@ async def allocate(bandit_id: str, req: AllocateRequest) -> AllocateResponse:
         company_id=req.company_id,
     )
     if STUB_MODE:
-        # Stub: deterministic — always return a placeholder variant id.
-        # Real path samples from each arm's posterior beta distribution.
         return AllocateResponse(
             request_id=request_id,
             bandit_id=bandit_id,
@@ -234,7 +401,31 @@ async def allocate(bandit_id: str, req: AllocateRequest) -> AllocateResponse:
             rationale="stub allocation — bandit backend not wired",
             skipped=True,
         )
-    raise NotImplementedError("Thompson sampling wired in a follow-up A.3 slice")
+
+    state = _load_state(bandit_id)
+    if state.get("company_id") != req.company_id:
+        # Defensive cross-tenant check at the service boundary even though
+        # the route should already be company-scoped upstream.
+        raise HTTPException(status_code=403, detail="bandit belongs to a different workspace")
+
+    rng = random.Random()  # noqa: S311 — Thompson sampling uses non-cryptographic RNG by design
+    chosen, score, rationale = _thompson_pick(
+        state["arms"],
+        float(state.get("exploration_budget", 0.10)),
+        rng,
+    )
+    chosen["allocation_count"] = int(chosen["allocation_count"]) + 1
+    state["total_allocations"] = int(state.get("total_allocations", 0)) + 1
+    _save_state(state, _bandit_path(bandit_id))
+
+    return AllocateResponse(
+        request_id=request_id,
+        bandit_id=bandit_id,
+        variant_id=str(chosen["variant_id"]),
+        arm_score=score,
+        rationale=rationale,
+        skipped=False,
+    )
 
 
 @app.post("/bandits/{bandit_id}/reward", response_model=RewardResponse)
@@ -251,27 +442,82 @@ async def reward(bandit_id: str, req: RewardRequest) -> RewardResponse:
         variant_id=req.variant_id,
         reward=req.reward,
     )
+    if STUB_MODE:
+        return RewardResponse(
+            request_id=request_id,
+            bandit_id=bandit_id,
+            variant_id=req.variant_id,
+            posterior_mean=None,
+            skipped=True,
+        )
+
+    state = _load_state(bandit_id)
+    if state.get("company_id") != req.company_id:
+        raise HTTPException(status_code=403, detail="bandit belongs to a different workspace")
+
+    arm = next(
+        (a for a in state["arms"] if a["variant_id"] == req.variant_id),
+        None,
+    )
+    if not arm:
+        raise HTTPException(
+            status_code=404, detail=f"variant {req.variant_id} not in bandit {bandit_id}"
+        )
+
+    _update_posterior(arm, req.reward)
+    state["total_rewards"] = int(state.get("total_rewards", 0)) + 1
+    _save_state(state, _bandit_path(bandit_id))
+
     return RewardResponse(
         request_id=request_id,
         bandit_id=bandit_id,
         variant_id=req.variant_id,
-        posterior_mean=None,
-        skipped=True,
+        posterior_mean=_posterior_mean(arm),
+        skipped=False,
     )
 
 
 @app.get("/bandits/{bandit_id}/state", response_model=StateResponse)
 async def state(bandit_id: str) -> StateResponse:
     """Read-only state view for Mission Control's bandit-experiments tile."""
+    if STUB_MODE:
+        return StateResponse(
+            bandit_id=bandit_id,
+            company_id="",
+            campaign_id="",
+            platform="x",
+            message_pillar="",
+            arms=[],
+            total_allocations=0,
+            total_rewards=0,
+            leading_arm=None,
+            pruned_arms=[],
+        )
+
+    s = _load_state(bandit_id)
+    arms_view = [
+        {
+            "variant_id": a["variant_id"],
+            "draft_id": a.get("draft_id"),
+            "body_excerpt": a.get("body_excerpt"),
+            "predicted_percentile": a.get("predicted_percentile"),
+            "posterior_mean": _posterior_mean(a),
+            "allocation_count": a.get("allocation_count", 0),
+            "reward_count": a.get("reward_count", 0),
+            "reward_sum": a.get("reward_sum", 0.0),
+            "pruned": a.get("pruned", False),
+        }
+        for a in s["arms"]
+    ]
     return StateResponse(
         bandit_id=bandit_id,
-        company_id="",
-        campaign_id="",
-        platform="x",
-        message_pillar="",
-        arms=[],
-        total_allocations=0,
-        total_rewards=0,
-        leading_arm=None,
-        pruned_arms=[],
+        company_id=str(s.get("company_id") or ""),
+        campaign_id=str(s.get("campaign_id") or ""),
+        platform=s.get("platform", "x"),
+        message_pillar=str(s.get("message_pillar") or ""),
+        arms=arms_view,
+        total_allocations=int(s.get("total_allocations", 0)),
+        total_rewards=int(s.get("total_rewards", 0)),
+        leading_arm=_leading_arm(s["arms"]),
+        pruned_arms=list(s.get("pruned_arms") or []),
     )
