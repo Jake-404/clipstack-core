@@ -14,6 +14,8 @@ dependencies = [
   "httpx>=0.27.0",
   "structlog>=24.4.0",
   "tenacity>=9.0.0",
+  # Phase B.5 observability — Langfuse self-host pushes here.
+  "langfuse>=2.50.0",
 ]
 
 [project.optional-dependencies]

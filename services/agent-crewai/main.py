@@ -28,6 +28,7 @@ from crews.lifecycle.crew import build_lifecycle_crew
 from crews.live_event_monitor.crew import build_live_event_monitor_crew
 from crews.trend_detector.crew import build_trend_detector_crew
 from models import LITELLM_BASE_URL, ensure_litellm_reachable
+from observability import LANGFUSE_ENABLED, flush_langfuse, init_langfuse
 
 log = structlog.get_logger()
 
@@ -36,10 +37,17 @@ DRY_RUN: bool = os.getenv("CREWAI_DRY_RUN", "1") == "1"
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    log.info("startup", litellm_base_url=LITELLM_BASE_URL, dry_run=DRY_RUN)
+    log.info(
+        "startup",
+        litellm_base_url=LITELLM_BASE_URL,
+        dry_run=DRY_RUN,
+        langfuse_enabled=LANGFUSE_ENABLED,
+    )
     # Don't hard-fail on litellm unreachable in dev; warn loudly.
     await ensure_litellm_reachable(strict=False)
+    init_langfuse()
     yield
+    flush_langfuse()
     log.info("shutdown")
 
 

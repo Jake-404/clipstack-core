@@ -172,6 +172,20 @@ litellm_settings:
   cache_params:
     type: local
     ttl: 300
+  # Phase B.5 observability — every successful + failed model call emits a
+  # Langfuse generation. Pairs with services/agent-crewai/observability.py +
+  # services/agent-langgraph/observability.py: when those services open a
+  # trace, the LiteLLM callback's spans nest under the parent trace via
+  # langfuse_trace_id metadata propagated by the SDK.
+  #
+  # Disabled when LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY are unset —
+  # LiteLLM logs a warning at startup but doesn't fail. See
+  # core/docs/observability.md for the full coverage matrix.
+  success_callback: ['langfuse']
+  failure_callback: ['langfuse']
+  # LiteLLM reads these at startup; they're populated by docker-compose
+  # from the same .env that the agent services use.
+  langfuse_default_tags: ['environment', 'service', 'crew_id']
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY

@@ -21,6 +21,7 @@ import structlog
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from observability import LANGFUSE_ENABLED, flush_langfuse, init_langfuse
 from workflows.publish_pipeline.graph import build_publish_pipeline
 
 log = structlog.get_logger()
@@ -34,8 +35,14 @@ POSTGRES_URL = os.getenv(
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    log.info("startup", litellm_base_url=LITELLM_BASE_URL)
+    log.info(
+        "startup",
+        litellm_base_url=LITELLM_BASE_URL,
+        langfuse_enabled=LANGFUSE_ENABLED,
+    )
+    init_langfuse()
     yield
+    flush_langfuse()
     log.info("shutdown")
 
 
