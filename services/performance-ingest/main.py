@@ -15,25 +15,15 @@ Replaces the nightly performance refresh with a streaming pipeline:
 Acceptance (Doc 4): metric updates land in agent context within 5 minutes
 of platform availability.
 
-Phase A.3 ships:
-  - FastAPI shell on :8006
-  - /ingest endpoint (manual snapshot upload — works without live pollers)
-  - /pollers/{platform}/{start,stop} placeholders + /pollers/status
-  - /anomaly/scan placeholder
-  - /campaigns/{id}/rollup placeholder
+Sprint-close+: /ingest emits content.metric_update events to Redpanda
+when EVENTBUS_ENABLED=true. Bandit-orchestrator's reward listener picks
+these up to attribute observed performance back to its arms — closes the
+generate→publish→measure→learn loop.
 
-Stub mode (env-aware default, same pattern as the other A.3 services):
-  dev/test: STUB_MODE on; /ingest logs + no-ops; pollers report inactive.
-  prod:     STUB_MODE off by default; calls hit NotImplementedError so a
-            forgotten-to-wire deployment fails loudly rather than silently
-            dropping every metric snapshot.
-
-Real backend (follow-up slice):
-  - aiokafka producer publishes content.metric_update + content.anomaly
-  - per-platform pollers (tweepy / praw / linkedin sdk / etc.) emit on cadence
-  - rolling z-score anomaly detector with workspace-tunable threshold
-  - campaign rollup either reads directly from Postgres post_metrics or
-    proxies to approval-ui's read API.
+Still stub: live pollers (tweepy/praw/etc.) and the rolling-z-score
+anomaly detector. They land with the [runtime] extra activation in
+follow-up slices once per-platform OAuth + the post_metrics persistence
+route ship.
 
 Mounted at port 8006. Health check consumed by docker-compose.
 """
@@ -43,12 +33,15 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import uuid4
 
 import structlog
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
+
+from producer import EventProducer
 
 log = structlog.get_logger()
 
@@ -72,6 +65,10 @@ STUB_MODE: bool = os.getenv("INGEST_STUB_MODE", _stub_mode_default()) == "1"
 REDPANDA_BROKERS = os.getenv("REDPANDA_BROKERS", "redpanda:9092")
 EVENTBUS_ENABLED = os.getenv("EVENTBUS_ENABLED", "false").lower() == "true"
 
+# Module-level singleton — assigned in lifespan so the test/import path
+# doesn't need a broker. Routes call `event_producer.emit(...)`.
+event_producer = EventProducer()
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -94,7 +91,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 "producer or unset INGEST_STUB_MODE."
             ),
         )
+    await event_producer.start()
     yield
+    await event_producer.stop()
     log.info("shutdown", service="performance-ingest")
 
 
@@ -217,14 +216,78 @@ async def health() -> dict[str, str]:
     return {"status": "ok", "service": "performance-ingest", "version": "0.1.0"}
 
 
+@app.get("/producer/status")
+async def producer_status() -> dict[str, object]:
+    """Operator visibility into the Redpanda producer's state. Surfaces
+    whether the bus is enabled + reachable + how many events have flowed
+    since last restart. Mission Control's real-time tile reads this every
+    ~30s alongside /pollers/status."""
+    return event_producer.stats
+
+
+def _snapshot_to_metric_events(
+    company_id: str,
+    client_id: str | None,
+    snapshot: MetricSnapshot,
+) -> list[tuple[str, dict[str, object]]]:
+    """One snapshot → multiple content.metric_update events (one per non-null
+    metric column). Each event carries the envelope plus payload shape from
+    services/shared/events/schemas.py::ContentMetricUpdatePayload.
+
+    Partitioning key = company_id so a workspace's metric stream lands on
+    the same partition (preserves per-draft ordering for the consumer's
+    velocity calculation).
+    """
+    metrics_present: list[tuple[str, float]] = [
+        (name, float(value))
+        for name, value in (
+            ("impressions", snapshot.impressions),
+            ("reach", snapshot.reach),
+            ("clicks", snapshot.clicks),
+            ("reactions", snapshot.reactions),
+            ("comments", snapshot.comments),
+            ("shares", snapshot.shares),
+            ("saves", snapshot.saves),
+            ("conversions", snapshot.conversions),
+        )
+        if value is not None
+    ]
+
+    out: list[tuple[str, dict[str, object]]] = []
+    occurred_at = datetime.now(UTC).isoformat()
+    for metric_name, value in metrics_present:
+        envelope = {
+            "id": f"evt_{uuid4().hex}",
+            "topic": "content.metric_update",
+            "version": 1,
+            "occurred_at": occurred_at,
+            "company_id": company_id,
+            "client_id": client_id,
+            "trace_id": None,
+            "payload": {
+                "draft_id": snapshot.draft_id,
+                "platform": snapshot.platform,
+                "metric": metric_name,
+                "value": value,
+                "percentile": None,   # filled in by downstream enrichment
+                "velocity": None,     # ditto — needs prior snapshot
+                "snapshot_at": snapshot.snapshot_at,
+            },
+        }
+        out.append((company_id, envelope))
+    return out
+
+
 @app.post("/ingest", response_model=IngestResponse)
 async def ingest(req: IngestRequest) -> IngestResponse:
-    """Accept a batch of metric snapshots. Real path:
-      1. Validate against per-workspace draft_id existence (RLS-safe via API)
-      2. Deduplicate against (draft_id, platform, snapshot_at)
-      3. Compute velocity vs. previous snapshot
-      4. Write to post_metrics
-      5. Emit content.metric_update event per accepted snapshot
+    """Accept a batch of metric snapshots and emit content.metric_update
+    events for downstream consumers (bandit-orchestrator, anomaly detector,
+    campaign rollup).
+
+    Persistence to post_metrics is out of scope for this slice — when the
+    approval-ui metrics POST route lands, /ingest will fan out to both
+    Postgres + Redpanda. For now, the events themselves carry the value
+    (consumers can reconstruct any state they need from the event stream).
     """
     request_id = req.request_id or str(uuid4())
     log.info(
@@ -232,6 +295,8 @@ async def ingest(req: IngestRequest) -> IngestResponse:
         request_id=request_id,
         company_id=req.company_id,
         snapshot_count=len(req.snapshots),
+        eventbus_enabled=EVENTBUS_ENABLED,
+        producer_enabled=event_producer.is_enabled,
     )
 
     if STUB_MODE:
@@ -243,7 +308,37 @@ async def ingest(req: IngestRequest) -> IngestResponse:
             skipped=True,
         )
 
-    raise NotImplementedError("Pollers + Redpanda producer wired in a follow-up A.3 slice")
+    # Build the full event batch first, then emit. Keeps the request path
+    # easy to reason about + lets us count regardless of bus availability.
+    items: list[tuple[str, dict[str, object]]] = []
+    for snap in req.snapshots:
+        items.extend(_snapshot_to_metric_events(req.company_id, req.client_id, snap))
+
+    emitted = 0
+    if event_producer.is_enabled and items:
+        # producer.emit_many takes (key, value) tuples but its key is
+        # str | None; we always have a company_id. Cast for type clarity.
+        emitted = await event_producer.emit_many(
+            "content.metric_update",
+            [(key, value) for key, value in items],
+        )
+
+    log.info(
+        "ingest.completed",
+        request_id=request_id,
+        company_id=req.company_id,
+        snapshot_count=len(req.snapshots),
+        events_built=len(items),
+        events_emitted=emitted,
+    )
+
+    return IngestResponse(
+        request_id=request_id,
+        accepted_count=len(req.snapshots),
+        duplicate_count=0,
+        events_emitted=emitted,
+        skipped=False,
+    )
 
 
 @app.get("/pollers/status", response_model=PollersStatusResponse)

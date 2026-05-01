@@ -11,10 +11,12 @@ WORKDIR /app
 RUN pip install --no-cache-dir uv==0.5.4
 
 COPY pyproject.toml ./
-# Stub mode — base deps only. The `[runtime]` extra (aiokafka + tweepy +
-# praw + numpy + asyncpg) wires when live pollers + Redpanda producer ship
-# in a follow-up A.3 slice. Pulling now adds ~150MB without a use.
-RUN uv pip install --system --no-cache .
+# Real backend image installs aiokafka so /ingest can emit
+# content.metric_update events to Redpanda. tweepy/praw/asyncpg/numpy
+# are still in `[runtime]` for the future poller + anomaly slices —
+# pulling now is cheap (~20MB extra over aiokafka alone) and avoids a
+# multi-stage build.
+RUN uv pip install --system --no-cache '.[runtime]'
 
 COPY . .
 
