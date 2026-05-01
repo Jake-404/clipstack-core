@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [agent-crewai, agent-langgraph, pii-detection, output-moderation, voice-scorer, percentile-predictor, bandit-orchestrator]
+        service: [agent-crewai, agent-langgraph, pii-detection, output-moderation, voice-scorer, percentile-predictor, bandit-orchestrator, performance-ingest]
     defaults:
       run:
         working-directory: services/${{ matrix.service }}

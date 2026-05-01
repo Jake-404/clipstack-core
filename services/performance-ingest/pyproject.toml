@@ -1,0 +1,50 @@
+[project]
+name = "clipstack-performance-ingest"
+version = "0.1.0"
+description = "Per-platform pollers + anomaly detector + campaign rollup. Doc 4 §2.2."
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.32.0",
+  "pydantic>=2.9.0",
+  "httpx>=0.27.0",
+  "structlog>=24.4.0",
+  "tenacity>=9.0.0",
+]
+
+[project.optional-dependencies]
+# Real backends land here when pollers + Redpanda producer wire in a follow-up
+# A.3 slice. Stub keeps the image small.
+runtime = [
+  "aiokafka>=0.12.0",       # Redpanda producer for content.metric_update
+  "tweepy>=4.14.0",         # X poller
+  "praw>=7.8.0",            # Reddit poller
+  "asyncpg>=0.30.0",        # campaign rollup reads (alternative to API call)
+  "numpy>=1.26.0",          # rolling z-score in anomaly detector
+]
+dev = [
+  "ruff>=0.7.0",
+  "mypy>=1.13.0",
+  "pytest>=8.3.0",
+  "pytest-asyncio>=0.24.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "S", "PT"]
+ignore = ["S101"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
