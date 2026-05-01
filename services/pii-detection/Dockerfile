@@ -13,9 +13,12 @@ RUN pip install --no-cache-dir uv==0.5.4
 COPY pyproject.toml ./
 RUN uv pip install --system --no-cache .
 
-# Presidio's spaCy model download lands here in A.2:
-#   RUN python -m spacy download en_core_web_lg
-# A.1 stub mode skips it.
+# Presidio's spaCy model — sm by default for fast cold start (~50MB).
+# Production deployments override SPACY_MODEL=en_core_web_lg (~1.4GB,
+# higher accuracy) and rebuild this layer with `--build-arg SPACY_MODEL=...`.
+ARG SPACY_MODEL=en_core_web_sm
+ENV SPACY_MODEL=${SPACY_MODEL}
+RUN python -m spacy download ${SPACY_MODEL}
 
 COPY . .
 
