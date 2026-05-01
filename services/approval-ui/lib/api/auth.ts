@@ -1,15 +1,25 @@
-// Auth + tenant resolution stub.
+// Auth + tenant resolution.
 //
-// A.1 placeholder — every request returns a hardcoded user + workspace
-// when a single env var is set. This is enough to wire route shapes and
-// run integration tests; production WorkOS SSO + membership lookup land
-// in a follow-up A.2 slice.
+// Two paths:
+//   1. WorkOS session cookie (B.6) — production path. Authkit issues the user;
+//      /api/auth/callback writes the encrypted iron-session cookie; this
+//      resolver reads + verifies it and looks up the active membership.
+//   2. AUTH_STUB env-var pair — dev/test only. Refused at NODE_ENV=production.
+//      Convenient for local route exercise without provisioning WorkOS.
 //
-// The shape (resolveSession returns SessionContext or throws unauthorized)
-// is final — only the implementation behind it changes when WorkOS lands.
+// The cookie path is preferred. Stub is a fallback that activates ONLY when
+// the cookie is absent. A request that carries a session cookie always uses
+// the cookie path.
+
+import { and, eq, isNull } from "drizzle-orm";
+
+import { getDb } from "@/lib/db/client";
+import { memberships } from "@/lib/db/schema/memberships";
+import { roles } from "@/lib/db/schema/roles";
+import { isUuid } from "@/lib/validation/uuid";
 
 import { ApiError } from "./errors";
-import { isUuid } from "@/lib/validation/uuid";
+import { getSession } from "./session";
 
 export interface SessionContext {
   userId: string;
@@ -25,13 +35,35 @@ const STUB_ENABLED_KEYS = ["AUTH_STUB_USER_ID", "AUTH_STUB_COMPANY_ID"] as const
 /**
  * Resolve the session for the current request.
  *
- * A.1: stub mode. If `AUTH_STUB_USER_ID` + `AUTH_STUB_COMPANY_ID` are set,
- * return a fake session with role 'owner'. Used for local dev + the early
- * integration tests. Setting only one is a configuration error and throws.
- *
- * A.2 (next slice): WorkOS session cookie + memberships query.
+ * Tries the WorkOS-issued session cookie first; falls back to AUTH_STUB env
+ * vars in dev/test. Throws ApiError on mis-config (partial stub, production
+ * stub, missing membership).
  */
 export async function resolveSession(): Promise<SessionContext> {
+  // ─── 1. WorkOS session cookie ─────────────────────────────────────────
+  const session = await getSession();
+  if (session.userId && session.activeCompanyId && session.authenticatedAt) {
+    // Resolve role on every request. Cheap (indexed lookup) and ensures a
+    // revoked membership stops working immediately rather than waiting for
+    // the cookie to expire.
+    const roleSlug = await resolveRoleSlug(session.userId, session.activeCompanyId);
+    if (!roleSlug) {
+      // Membership revoked between login and now. Treat as logged-out.
+      session.destroy();
+      throw new ApiError(
+        "unauthorized",
+        "membership revoked — please sign in again",
+      );
+    }
+    return {
+      userId: session.userId,
+      activeCompanyId: session.activeCompanyId,
+      roleSlug,
+      authenticatedAt: session.authenticatedAt,
+    };
+  }
+
+  // ─── 2. AUTH_STUB fallback (dev/test only) ────────────────────────────
   const userId = process.env.AUTH_STUB_USER_ID;
   const companyId = process.env.AUTH_STUB_COMPANY_ID;
 
@@ -63,7 +95,31 @@ export async function resolveSession(): Promise<SessionContext> {
     };
   }
 
-  throw new ApiError("unauthorized", "no session — auth stub not configured");
+  throw new ApiError("unauthorized", "no session — sign in via /login");
+}
+
+/**
+ * Look up the role slug for a (userId, companyId) pair via the active
+ * membership. Returns null when no non-revoked membership exists — the
+ * caller should treat that as "session no longer valid".
+ */
+async function resolveRoleSlug(
+  userId: string,
+  companyId: string,
+): Promise<string | null> {
+  const rows = await getDb()
+    .select({ slug: roles.slug })
+    .from(memberships)
+    .innerJoin(roles, eq(memberships.roleId, roles.id))
+    .where(
+      and(
+        eq(memberships.userId, userId),
+        eq(memberships.companyId, companyId),
+        isNull(memberships.revokedAt),
+      ),
+    )
+    .limit(1);
+  return rows[0]?.slug ?? null;
 }
 
 // ─── Service-token authentication ──────────────────────────────────────────
