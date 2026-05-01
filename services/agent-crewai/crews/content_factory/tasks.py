@@ -121,30 +121,62 @@ def task_devils_advocate(qa: Agent, context: list[Task]) -> Task:
     )
 
 
+def task_claim_verifier(verifier: Agent, context: list[Task]) -> Task:
+    """USP 8 — citation re-fetch + snippet match. Runs after the adapters
+    so it sees the final shape of every claim that would ship; runs before
+    BrandQA so the voice-and-safety gate sees per-claim verdicts in context.
+    """
+    return Task(
+        description=(
+            "For every cited claim across the long-form draft + all per-"
+            "platform reshapes + the newsletter:\n\n"
+            "1. Run `claim_verifier` on the (statement, supporting_url, "
+            "   snippet) tuple. The tool re-fetches the URL, snippet-matches "
+            "   against current page text, and returns one of: verified | "
+            "   drift | dead_link | unsupported | paywalled | rate_limited.\n"
+            "2. For ambiguous results (drift score 0.4–0.7), use your own "
+            "   judgment: is the source still supporting the literal sense "
+            "   of the claim, or has the page edit changed what the source "
+            "   says? Mark accordingly.\n"
+            "3. Recall workspace lessons via `recall_lessons` for previously "
+            "   captured drift patterns on these sources.\n"
+            "4. Emit one structured per-claim verdict. Any non-verified claim "
+            "   is a hard block downstream — surface revision instructions "
+            "   (replace source / rephrase to match snippet / drop claim)."
+        ),
+        agent=verifier,
+        context=context,
+        expected_output=(
+            "Per-claim verdict (JSON): claim_id, statement, supporting_url, "
+            "verifier_status, verifier_score, rationale, revision_action."
+        ),
+    )
+
+
 def task_brand_qa(qa: Agent, context: list[Task]) -> Task:
     return Task(
         description=(
-            "Read the DevilsAdvocateQA verdict from the prior task FIRST. Any "
-            "draft it marked 'block' fails immediately. Any 'revise' findings "
-            "must be either (a) fixed in your output verdict's revision notes "
-            "or (b) escalated to BLOCK if you can't see how to fix.\n\n"
-            "Then run the four-tool pass on every adapted draft:\n"
+            "Read the DevilsAdvocateQA verdict + ClaimVerifier verdicts from "
+            "the prior tasks FIRST. Any draft DevilsAdvocate marked 'block' "
+            "fails immediately. Any non-verified claim from ClaimVerifier "
+            "is a hard block on the draft that contains it.\n\n"
+            "Then run the three-tool pass on every adapted draft:\n"
             "  1. `voice_score`         — vs. workspace brand corpus\n"
-            "  2. `claim_verifier`      — every cited URL still supports its claim\n"
-            "  3. `brand_safety_check`  — profanity / blocklist / competitor / "
-            "regulated-claim shapes for active regimes; `severity='block'` "
-            "fails the draft, `disclosure_required` adds a disclosure block\n"
-            "  4. `recall_lessons`      — workspace history of corrections\n\n"
-            "Final verdict per draft: PASS (devil's advocate cleared, voice "
-            "above threshold, all claims verified, no brand-safety blocks, "
-            "no lesson contradictions), REVISE (fixable with concrete "
-            "instructions including any required disclosure blocks), or BLOCK."
+            "  2. `brand_safety_check`  — profanity / blocklist / competitor / "
+            "     regulated-claim shapes for active regimes; `severity='block'` "
+            "     fails the draft, `disclosure_required` adds a disclosure block\n"
+            "  3. `recall_lessons`      — workspace history of corrections\n\n"
+            "Final verdict per draft: PASS (DevilsAdvocate cleared, all "
+            "ClaimVerifier verdicts = verified, voice above threshold, no "
+            "brand-safety blocks, no lesson contradictions), REVISE (fixable "
+            "with concrete instructions including any required disclosure "
+            "blocks), or BLOCK."
         ),
         agent=qa,
         context=context,
         expected_output=(
-            "Verdict (PASS|REVISE|BLOCK) per draft + voice_score + claim "
-            "verdicts + brand_safety findings + required disclosures + "
-            "DevilsAdvocate harm_risk passthrough + revision notes."
+            "Verdict (PASS|REVISE|BLOCK) per draft + voice_score + "
+            "brand_safety findings + required disclosures + ClaimVerifier "
+            "passthrough + DevilsAdvocate harm_risk passthrough + revision notes."
         ),
     )

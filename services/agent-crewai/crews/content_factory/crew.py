@@ -1,8 +1,11 @@
-"""Content Factory crew assembly. Doc 1 §7.1.
+"""Content Factory crew assembly. Doc 1 §7.1 + Doc 5 §1.6 + USP 8 (Phase B).
 
-Sequential process: research → strategise → long-form → adapt-per-platform
-+ newsletter in parallel → brand-QA. Returns a `Crew` object the caller
-can `kickoff(inputs=...)` once tools are wired (A.2).
+Sequential process:
+  research → strategise → long-form → adapt-per-platform + newsletter
+  → DevilsAdvocateQA → ClaimVerifier → BrandQA
+
+Returns a `Crew` object the caller can `kickoff(inputs=...)` once
+LiteLLM keys + tool backends are wired.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ from crewai import Crew, Process
 
 from .agents import (
     make_brand_qa,
+    make_claim_verifier,
     make_devils_advocate_qa,
     make_long_form_writer,
     make_newsletter_adapter,
@@ -20,6 +24,7 @@ from .agents import (
 )
 from .tasks import (
     task_brand_qa,
+    task_claim_verifier,
     task_devils_advocate,
     task_long_form,
     task_newsletter_adapt,
@@ -55,6 +60,7 @@ def build_content_factory_crew(
     writer = make_long_form_writer()
     newsletter = make_newsletter_adapter()
     devils = make_devils_advocate_qa()
+    claim_verifier = make_claim_verifier()
     qa = make_brand_qa()
 
     social_agents = {p: make_social_adapter(p) for p in platforms}
@@ -66,10 +72,16 @@ def build_content_factory_crew(
         task_social_adapt(social_agents[p], p, context=[t_long]) for p in platforms
     ]
     t_news = task_newsletter_adapt(newsletter, context=[t_long])
-    # Devil's advocate (Doc 5 §1.6) runs above claim verification — its verdict
-    # feeds BrandQA so a single human approval surface sees both layers' findings.
+    # Three independent critic dimensions — each runs on the full draft set.
+    # DevilsAdvocate (framing/implication) → ClaimVerifier (citation correctness)
+    # → BrandQA (voice + brand safety). BrandQA reads both prior verdicts.
     t_devils = task_devils_advocate(devils, context=[t_long, *t_socials, t_news])
-    t_qa = task_brand_qa(qa, context=[t_long, *t_socials, t_news, t_devils])
+    t_claims = task_claim_verifier(
+        claim_verifier, context=[t_long, *t_socials, t_news]
+    )
+    t_qa = task_brand_qa(
+        qa, context=[t_long, *t_socials, t_news, t_devils, t_claims]
+    )
 
     crew = Crew(
         agents=[
@@ -79,9 +91,19 @@ def build_content_factory_crew(
             *social_agents.values(),
             newsletter,
             devils,
+            claim_verifier,
             qa,
         ],
-        tasks=[t_research, t_strat, t_long, *t_socials, t_news, t_devils, t_qa],
+        tasks=[
+            t_research,
+            t_strat,
+            t_long,
+            *t_socials,
+            t_news,
+            t_devils,
+            t_claims,
+            t_qa,
+        ],
         process=Process.sequential,
         verbose=False,
         memory=False,  # Persistent memory is `company_lessons` + Qdrant — not CrewAI-native.

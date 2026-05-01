@@ -1,9 +1,14 @@
-"""The seven roles of the Content Factory crew (Doc 1 §7.1 + Doc 5 §1.6).
+"""The eight roles of the Content Factory crew.
+
+Roster:
+  Researcher → Strategist → LongFormWriter → SocialAdapter (per platform)
+  → NewsletterAdapter → DevilsAdvocateQA (A.1) → ClaimVerifier (B.1)
+  → BrandQA
 
 Each agent gets a LiteLLM-routed model, a focused tool set, and a
-goal/backstory tuned to its function in the pipeline. Brand voice and
-editorial-memory tools are wired in A.2 — Phase A.0/A.1 wires the no-op
-tool stubs from `tools/` so the crew constructs cleanly.
+goal/backstory tuned to its function in the pipeline. Phase B split the
+single BrandQA into a focused voice + brand-safety critic, with a
+dedicated ClaimVerifier handling citation re-fetch + snippet match.
 """
 
 from __future__ import annotations
@@ -170,31 +175,78 @@ def make_devils_advocate_qa() -> Agent:
     )
 
 
+def make_claim_verifier() -> Agent:
+    """USP 8 — content provenance. Doc reference: Phase B.
+
+    Re-fetches each cited URL in the draft, snippet-matches the cited text
+    against current page content, and emits a per-claim verdict (verified /
+    drift / dead_link / unsupported / paywalled). Persists results to
+    content_claims rows so the Mission Control draft-detail panel can render
+    the per-claim provenance state.
+
+    Splits out from the previous BrandQA-does-everything pattern (A.0–A.1).
+    Each critic now has one dimension of focus: ClaimVerifier on citations,
+    BrandQA on voice + brand safety, DevilsAdvocateQA on framing/implication.
+    """
+    return Agent(
+        role="ClaimVerifier",
+        goal=(
+            "Verify every cited claim in the draft survives a re-fetch of its "
+            "supporting_url. For each claim, run `claim_verifier` and classify "
+            "the result: verified (snippet matches current page), drift "
+            "(snippet phrasing diverged), dead_link (4xx/5xx/DNS-fail), "
+            "unsupported (source no longer supports the literal sense), or "
+            "paywalled. Recall workspace lessons for similar past drift "
+            "patterns. Block any draft carrying a non-verified claim that "
+            "isn't immediately fixable."
+        ),
+        backstory=(
+            "You're the team's citation auditor. The model writes; you verify. "
+            "The most common failure isn't a hallucinated fact — it's a "
+            "correctly-cited claim whose source has since been edited, whose "
+            "URL has rotted, or whose snippet no longer says what the writer "
+            "thought it said. You catch those before a human approver has to."
+        ),
+        tools=[
+            claim_verifier_tool,
+            recall_lessons_tool,
+        ],
+        llm=_judge(),  # judgment-heavy on edge cases (paywall vs drift vs unsupported)
+        allow_delegation=False,
+        verbose=False,
+    )
+
+
 def make_brand_qa() -> Agent:
-    """The voice-fingerprint + brand-safety critic. USP 3 + plan open-Q #3.
-    Phase A.0/A.1 ships the role; `voice_score` and `brand_safety_check`
-    real backends land in A.2 (SetFit corpus + regex/LLM scanner)."""
+    """Voice-fingerprint + brand-safety critic. USP 3 + plan open-Q #3.
+
+    Phase B narrowed: BrandQA no longer handles claim verification (split
+    into a dedicated ClaimVerifier role). BrandQA's gate is voice + safety
+    + workspace-lesson recall — the dimensions that need a brand-trained
+    model and a per-workspace policy.
+    """
     return Agent(
         role="BrandQA",
         goal=(
             "Validate every adapted draft against (a) the brand voice corpus "
-            "via `voice_score`, (b) factual claim provenance via `claim_verifier`, "
-            "(c) brand-safety + active regulatory regimes via `brand_safety_check`, "
-            "and (d) workspace lessons via `recall_lessons`. Block any draft "
-            "below the voice threshold OR with an unverified claim OR with a "
-            "brand-safety finding of severity='block' OR contradicting a "
-            "captured `forever`-scoped lesson."
+            "via `voice_score`, (b) brand-safety + active regulatory regimes "
+            "via `brand_safety_check`, and (c) workspace lessons via "
+            "`recall_lessons`. Read the ClaimVerifier verdict from the prior "
+            "task — any non-verified claim you see is a hard block. Block "
+            "any draft below the voice threshold OR with a brand-safety "
+            "finding of severity='block' OR contradicting a captured "
+            "`forever`-scoped lesson."
         ),
         backstory=(
-            "You're the last reviewer before a piece goes to a human approver. "
-            "You don't write. You don't strategise. You catch what shouldn't ship — "
-            "off-voice copy, drifted citations, regulated claims missing their "
-            "disclosure block, blocklisted terms, lessons this team has already "
-            "learned the hard way."
+            "You're the final reviewer before a piece goes to a human approver. "
+            "You don't write. You don't strategise. Citation correctness is "
+            "ClaimVerifier's job — yours is voice + safety + lesson-recall. "
+            "Off-voice copy, regulated claims missing their disclosure block, "
+            "blocklisted terms, lessons this team has already learned the "
+            "hard way: that's what you catch."
         ),
         tools=[
             voice_score_tool,
-            claim_verifier_tool,
             brand_safety_check_tool,
             recall_lessons_tool,
         ],

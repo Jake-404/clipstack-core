@@ -26,6 +26,9 @@ log = structlog.get_logger()
 EVENTBUS_ENABLED: bool = os.getenv("EVENTBUS_ENABLED", "false").lower() == "true"
 PERCENTILE_PREDICTOR_BASE_URL = os.getenv("PERCENTILE_PREDICTOR_BASE_URL")
 BANDIT_ORCHESTRATOR_BASE_URL = os.getenv("BANDIT_ORCHESTRATOR_BASE_URL")
+APPROVAL_UI_BASE_URL = os.getenv("APPROVAL_UI_BASE_URL")
+SERVICE_TOKEN = os.getenv("SERVICE_TOKEN")
+SERVICE_NAME = "agent-langgraph"
 
 
 # ─── Review-cycle nodes ──────────────────────────────────────────────────────
@@ -273,9 +276,59 @@ def publish_to_channel(state: PublishState) -> dict:
 
 
 def record_metering(state: PublishState) -> dict:
-    """USP 10 — emit a meter_events row in the same transaction as the publish.
+    """USP 10 — emit a meter_events row for the publish.
 
-    Phase A.0 stub: returns a fake metering id. Real impl writes to Postgres.
+    Phase B.3: when APPROVAL_UI_BASE_URL + SERVICE_TOKEN are set, POSTs to
+    /api/companies/{cid}/meter-events with kind='publish' and ref_kind/ref_id
+    pointing at the draft. Falls back to a stub event id when env not set
+    so the graph still completes in dev without the API live.
+
+    Fail-open on outage: a metering write failure logs the error but doesn't
+    block the run from completing. The publish has already happened; a
+    follow-up reconciler sweeps missing meter rows from `audit_log` where
+    `kind='draft.published'` lacks a matching `kind='metering.written'`.
     """
-    log.info("record_metering", run_id=state.get("run_id"))
-    return {"metering_event_id": f"meter_{state.get('draft_id', 'unknown')}"}
+    run_id = state.get("run_id")
+    draft_id = state.get("draft_id", "unknown")
+    company_id = state.get("company_id")
+
+    # No real backend wired — return a stub id and let the graph complete.
+    if not (APPROVAL_UI_BASE_URL and SERVICE_TOKEN and company_id):
+        log.debug("record_metering.fallback_stub", run_id=run_id)
+        return {"metering_event_id": f"meter_stub_{draft_id}"}
+
+    url = f"{APPROVAL_UI_BASE_URL.rstrip('/')}/api/companies/{company_id}/meter-events"
+    body = {
+        "kind": "publish",
+        "quantity": 1,
+        "refKind": "draft",
+        "refId": draft_id,
+        "occurredAt": state.get("published_at"),
+        "clientId": None,
+    }
+    headers = {
+        "X-Clipstack-Service-Token": SERVICE_TOKEN,
+        "X-Clipstack-Active-Company": company_id,
+        "X-Clipstack-Service-Name": SERVICE_NAME,
+    }
+
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.post(url, json=body, headers=headers)
+    except (httpx.HTTPError, OSError) as e:
+        log.warning("record_metering.http_error", run_id=run_id, error=str(e))
+        return {"metering_event_id": None}
+
+    if resp.status_code != 200:
+        log.warning(
+            "record_metering.bad_status",
+            run_id=run_id,
+            status=resp.status_code,
+            body=resp.text[:200],
+        )
+        return {"metering_event_id": None}
+
+    data = resp.json()
+    event_id = data.get("data", {}).get("eventId") if isinstance(data, dict) else None
+    log.info("record_metering.written", run_id=run_id, event_id=event_id)
+    return {"metering_event_id": event_id}

@@ -202,7 +202,8 @@ async def list_crews() -> dict[str, list[str]]:
     Doc reference matrix:
     - content_factory     [A.0]  Researcher → Strategist → LongFormWriter →
                                   SocialAdapter → NewsletterAdapter →
-                                  DevilsAdvocateQA (A.1) → BrandQA
+                                  DevilsAdvocateQA (A.1) →
+                                  ClaimVerifier (B.1) → BrandQA
     - trend_detector      [A.3]  Doc 4 §2.5 — brand-safety pre-gated
     - algorithm_probe     [A.3]  Doc 4 §2.6 — least-sensitive workspace probe
     - live_event_monitor  [A.3]  Doc 4 §2.8 — severity × relevance scoring

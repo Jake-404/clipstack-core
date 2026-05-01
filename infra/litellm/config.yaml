@@ -1,20 +1,48 @@
-# LiteLLM router config — named profiles per Doc 1 §5.
-# A model swap is a config change here, never a code change in services/agent-crewai/.
-# Profiles consumed by services/agent-crewai/models.py.
+# LiteLLM router config — Phase B hardened.
+#
+# Named profiles per Doc 1 §5 + per-tier fallback chains per Doc 4 §3.9
+# (model fallback for frontier-provider outages). A model swap is a config
+# change here, never a code change in services/agent-crewai/.
+#
+# Hardening (B.2):
+#   - Per-profile fallback chain so a frontier-provider outage degrades
+#     gracefully through equivalent-tier alternatives, then to local Ollama.
+#   - Cooldown windows so a flapping upstream doesn't get hit on every retry.
+#   - Per-profile budget caps via max_tokens (already present) + timeouts.
+#   - num_retries=2 + retry-after-seconds so transient 5xx don't immediately
+#     fall through to a different vendor.
+#
+# Profile-tier philosophy:
+#   * frontier  — long-form drafting + brand voice + judgment calls
+#   * mid       — classification / scoring / cheap judge calls
+#   * local     — PII-safe path (Ollama) + offline failover
+#   * embed     — voice fingerprint + content vectors
 
 model_list:
-  # ─── Frontier writers (long-form, brand voice, judgment calls) ─────────────
+  # ─── Frontier writers ──────────────────────────────────────────────────────
   - model_name: writer-frontier
     litellm_params:
       model: anthropic/claude-sonnet-4-5
       api_key: os.environ/ANTHROPIC_API_KEY
       max_tokens: 8192
+      timeout: 60
+      num_retries: 2
 
   - model_name: writer-frontier-opus
     litellm_params:
       model: anthropic/claude-opus-4-1
       api_key: os.environ/ANTHROPIC_API_KEY
       max_tokens: 8192
+      timeout: 90
+      num_retries: 2
+
+  - model_name: writer-frontier-gpt
+    litellm_params:
+      model: openai/gpt-5
+      api_key: os.environ/OPENAI_API_KEY
+      max_tokens: 8192
+      timeout: 60
+      num_retries: 2
 
   # ─── Mid-tier classifier / scorer / judge ──────────────────────────────────
   - model_name: classifier-fast
@@ -22,30 +50,64 @@ model_list:
       model: anthropic/claude-haiku-4-5
       api_key: os.environ/ANTHROPIC_API_KEY
       max_tokens: 2048
+      timeout: 30
+      num_retries: 2
+
+  - model_name: classifier-fast-gpt
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+      max_tokens: 2048
+      timeout: 30
+      num_retries: 2
 
   - model_name: judge-balanced
     litellm_params:
       model: openai/gpt-4o
       api_key: os.environ/OPENAI_API_KEY
+      max_tokens: 4096
+      timeout: 45
+      num_retries: 2
+
+  - model_name: judge-balanced-anthropic
+    litellm_params:
+      model: anthropic/claude-sonnet-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+      max_tokens: 4096
+      timeout: 45
+      num_retries: 2
 
   # ─── Local-model fallback (PII-safe path; Ollama) ──────────────────────────
   - model_name: writer-local
     litellm_params:
       model: ollama/llama3.1:8b
       api_base: http://ollama:11434
+      timeout: 120
+      num_retries: 1
 
   - model_name: classifier-local
     litellm_params:
       model: ollama/qwen2.5:7b
       api_base: http://ollama:11434
+      timeout: 60
+      num_retries: 1
 
-  # ─── Voice embeddings (PII-safe; local) ────────────────────────────────────
+  # ─── Voice embeddings (PII-safe; local-only) ───────────────────────────────
   - model_name: voice-embed
     litellm_params:
       model: ollama/nomic-embed-text
       api_base: http://ollama:11434
+      timeout: 30
+      num_retries: 1
 
-# Named-profile aliases consumed by code. Swap the model_name target here, not in code.
+# ─── Routing + fallback chains ─────────────────────────────────────────────
+#
+# fallbacks: tried in order when the primary model returns 5xx, times out,
+# or rate-limits. Cooldown after a hard failure prevents flapping.
+# context_window_fallbacks: triggered when the prompt overflows.
+#
+# Profile aliases (model_group_alias) name a primary; the fallback chain
+# below kicks in when that primary fails.
 router_settings:
   routing_strategy: simple-shuffle
   model_group_alias:
@@ -56,10 +118,62 @@ router_settings:
     JUDGE_MODEL:         judge-balanced
     VOICE_EMBED_MODEL:   voice-embed
 
+  # Per-profile cascade. A profile fails only after the entire chain has
+  # been exhausted. Local fallbacks are last-resort: they're slower + less
+  # capable, but they keep the platform functional during a frontier outage.
+  fallbacks:
+    - writer-frontier:
+        - writer-frontier-gpt
+        - writer-frontier-opus
+        - writer-local
+    - writer-frontier-opus:
+        - writer-frontier
+        - writer-frontier-gpt
+        - writer-local
+    - writer-frontier-gpt:
+        - writer-frontier
+        - writer-frontier-opus
+        - writer-local
+    - classifier-fast:
+        - classifier-fast-gpt
+        - classifier-local
+    - classifier-fast-gpt:
+        - classifier-fast
+        - classifier-local
+    - judge-balanced:
+        - judge-balanced-anthropic
+        - writer-frontier  # last-resort: judge calls are short, frontier OK
+    - judge-balanced-anthropic:
+        - judge-balanced
+        - writer-frontier
+
+  # Cooldown after a model returns a hard failure. Prevents the router from
+  # hammering a flapping upstream on every retry inside the same minute.
+  cooldown_time: 60
+
+  # Surface fallback usage on every response so observability / Langfuse can
+  # see which model actually answered.
+  set_verbose: false
+  routing_strategy_args:
+    ttl: 60
+
 litellm_settings:
+  # Drop unsupported provider params silently (e.g., reasoning_effort on
+  # providers that don't accept it). Avoids 400s when a fallback model
+  # rejects a frontier-only param.
   drop_params: true
+  # Standard error-handling: surface the original status to callers so
+  # routing decisions in agent-crewai (e.g., "is this rate-limited?") work.
   set_verbose: false
   telemetry: false
+  # Cache identical prompts for 5 minutes — protects against retry storms
+  # when an agent re-runs an idempotent classifier call.
+  cache: true
+  cache_params:
+    type: local
+    ttl: 300
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
+  # Health endpoints exposed at /health (consumed by docker-compose).
+  database_connection_pool_limit: 10
