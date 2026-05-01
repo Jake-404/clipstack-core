@@ -10,13 +10,15 @@
 
 import { type NextRequest } from "next/server";
 import { z } from "zod";
-import { and, desc, eq, gte, isNotNull } from "drizzle-orm";
+import { and, desc, eq, gte, isNotNull, sql } from "drizzle-orm";
 
 import { resolveServiceOrSession } from "@/lib/api/auth";
 import { auditAccess } from "@/lib/api/audit";
+import { embed, vectorLiteral } from "@/lib/api/embeddings";
 import { badRequest, forbidden, validationFailed } from "@/lib/api/errors";
 import { ok, withApi } from "@/lib/api/respond";
 import { withTenant } from "@/lib/db/client";
+import { contentEmbeddings } from "@/lib/db/schema/content-embeddings";
 import { drafts } from "@/lib/db/schema/drafts";
 import { postMetrics } from "@/lib/db/schema/post-metrics";
 import { isUuid } from "@/lib/validation/uuid";
@@ -91,6 +93,27 @@ export const GET = withApi(async (req: NextRequest, ctx: RouteContext) => {
   const percentileColumn = percentileColumnFor(kpi);
   const valueColumn = valueColumnFor(kpi);
 
+  // When a topic is supplied, embed it once outside withTenant and use it
+  // to cosine-rerank the candidate set. Without a topic, fall back to
+  // ordering by absolute KPI value (the A.2 behaviour). The embed call is
+  // outside the tenant txn so the network roundtrip doesn't hold a
+  // transaction open.
+  let topicVecLiteral: string | null = null;
+  if (topic) {
+    try {
+      topicVecLiteral = vectorLiteral(await embed(topic));
+    } catch (e) {
+      // Fail-soft: if LiteLLM is unreachable, log the cause and fall back
+      // to KPI-only ranking. The agent's prompt still gets useful results;
+      // it just doesn't get the topic-aware re-rank that day.
+      console.warn(
+        "[high-performers] embed failed, falling back to KPI-only ranking",
+        e instanceof Error ? e.message : e,
+      );
+      topicVecLiteral = null;
+    }
+  }
+
   const rows = await withTenant(companyId, async (tx) => {
     const conditions = [
       eq(drafts.companyId, companyId),
@@ -100,6 +123,56 @@ export const GET = withApi(async (req: NextRequest, ctx: RouteContext) => {
     ];
     if (platform) conditions.push(eq(postMetrics.platform, platform));
 
+    if (topicVecLiteral) {
+      // Topic-aware path: blend KPI percentile (workspace-relative
+      // performance) with cosine similarity to the topic. Score formula:
+      //   0.6 * (kpi_percentile / 100) + 0.4 * (1 - cosine_distance)
+      // Tunable via workspace config later; A.3 default 60/40 favours
+      // proven performance over topic match.
+      const distanceExpr = sql`${contentEmbeddings.embedding} <=> ${topicVecLiteral}::vector`;
+      const scoreExpr = sql<number>`
+        0.6 * (${percentileColumn} / 100.0) + 0.4 * (1.0 - (${distanceExpr}))
+      `;
+
+      const result = await tx
+        .select({
+          draftId: drafts.id,
+          channel: drafts.channel,
+          title: drafts.title,
+          body: drafts.body,
+          publishedAt: drafts.publishedAt,
+          publishedUrl: drafts.publishedUrl,
+          kpiValue: valueColumn,
+          kpiPercentile: percentileColumn,
+          snapshotAt: postMetrics.snapshotAt,
+          blendedScore: scoreExpr,
+        })
+        .from(drafts)
+        .innerJoin(postMetrics, eq(postMetrics.draftId, drafts.id))
+        .innerJoin(contentEmbeddings, eq(contentEmbeddings.draftId, drafts.id))
+        .where(and(...conditions))
+        .orderBy(desc(scoreExpr))
+        .limit(k);
+
+      await auditAccess({
+        tx,
+        ctx: ctxAuth,
+        companyId,
+        kind: "drafts.read.high_performers",
+        details: {
+          kpi,
+          percentile,
+          k,
+          platform: platform ?? null,
+          topic: topic ?? null,
+          rankingMode: "topic_blended",
+          resultCount: result.length,
+        },
+      });
+      return { rows: result, mode: "topic_blended" as const };
+    }
+
+    // KPI-only path (no topic OR embed failed).
     const result = await tx
       .select({
         draftId: drafts.id,
@@ -111,6 +184,7 @@ export const GET = withApi(async (req: NextRequest, ctx: RouteContext) => {
         kpiValue: valueColumn,
         kpiPercentile: percentileColumn,
         snapshotAt: postMetrics.snapshotAt,
+        blendedScore: sql<number | null>`NULL::DOUBLE PRECISION`,
       })
       .from(drafts)
       .innerJoin(postMetrics, eq(postMetrics.draftId, drafts.id))
@@ -118,9 +192,6 @@ export const GET = withApi(async (req: NextRequest, ctx: RouteContext) => {
       .orderBy(desc(valueColumn))
       .limit(k);
 
-    // Audit cross-tenant data access. Service-token reads MUST be auditable;
-    // user-session reads are audited too for consistency. Same txn so audit
-    // is atomic with the read it audits.
     await auditAccess({
       tx,
       ctx: ctxAuth,
@@ -132,11 +203,12 @@ export const GET = withApi(async (req: NextRequest, ctx: RouteContext) => {
         k,
         platform: platform ?? null,
         topic: topic ?? null,
+        rankingMode: "kpi_only",
+        embedFailedFallback: Boolean(topic && !topicVecLiteral),
         resultCount: result.length,
       },
     });
-
-    return result;
+    return { rows: result, mode: "kpi_only" as const };
   });
 
   return ok({
@@ -144,10 +216,9 @@ export const GET = withApi(async (req: NextRequest, ctx: RouteContext) => {
     percentile,
     k,
     platform: platform ?? null,
-    // Topic returned in the response so callers can confirm what was searched
-    // even though A.2 doesn't yet use it for ranking.
     topic: topic ?? null,
-    results: rows.map((r) => ({
+    rankingMode: rows.mode,
+    results: rows.rows.map((r) => ({
       draftId: r.draftId,
       channel: r.channel,
       title: r.title,
@@ -157,6 +228,7 @@ export const GET = withApi(async (req: NextRequest, ctx: RouteContext) => {
       kpiValue: r.kpiValue,
       kpiPercentile: r.kpiPercentile,
       snapshotAt: r.snapshotAt,
+      blendedScore: r.blendedScore,
     })),
   });
 });

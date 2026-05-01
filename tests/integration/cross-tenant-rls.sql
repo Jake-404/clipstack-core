@@ -225,6 +225,105 @@ BEGIN
   DELETE FROM company_lessons WHERE id = inserted_id;
 END $$;
 
+-- ─── Test 7: cosine ordering + RLS still scopes ─────────────────────────
+-- Insert two lessons in workspace-a + two in workspace-b, each with a
+-- distinct deterministic embedding. Then bind to workspace-a, run a
+-- cosine-similarity query against a chosen target vector, and assert:
+--   (a) workspace-a's lessons are returned in cosine-distance order
+--   (b) workspace-b's lessons are NOT returned (RLS still applies even
+--       when the ORDER BY is a vector op)
+--
+-- The lessons live in three "axes" of embedding space so the ordering is
+-- predictable: lesson L1 is near the X axis, L2 near Y, L3 near Z. The
+-- query vector is the X axis, so L1 should come first in workspace-a.
+
+-- Reset workspace-b's parent so test 5's mutation doesn't bleed into
+-- include_client_children semantics here.
+RESET ROLE;
+UPDATE companies
+   SET parent_company_id = NULL
+ WHERE id = '22222222-2222-2222-2222-222222222222';
+
+-- Build three orthogonal-ish 384-d unit vectors via generate_series.
+-- v_x : 1.0 in slot 0, 0.0 elsewhere
+-- v_y : 1.0 in slot 1, 0.0 elsewhere
+-- v_z : 1.0 in slot 2, 0.0 elsewhere
+INSERT INTO company_lessons (id, company_id, kind, scope, rationale, embedding)
+VALUES
+  -- workspace-a / near-X
+  ('cccc1111-cccc-cccc-cccc-cccccccccccc',
+   '11111111-1111-1111-1111-111111111111', 'human_denied', 'forever',
+   'cosine test L1 (near X axis) — sufficient rationale length for the CHECK',
+   (SELECT ('[' || string_agg(CASE WHEN i=1 THEN '1.0' ELSE '0.0' END, ',') || ']')::vector
+      FROM generate_series(1, 384) AS i)),
+  -- workspace-a / near-Y
+  ('cccc2222-cccc-cccc-cccc-cccccccccccc',
+   '11111111-1111-1111-1111-111111111111', 'human_denied', 'forever',
+   'cosine test L2 (near Y axis) — sufficient rationale length for the CHECK',
+   (SELECT ('[' || string_agg(CASE WHEN i=2 THEN '1.0' ELSE '0.0' END, ',') || ']')::vector
+      FROM generate_series(1, 384) AS i)),
+  -- workspace-b / near-X (should NEVER show up in workspace-a queries)
+  ('dddd1111-dddd-dddd-dddd-dddddddddddd',
+   '22222222-2222-2222-2222-222222222222', 'human_denied', 'forever',
+   'cosine test L3 (near X axis but workspace-b) — RLS must hide this',
+   (SELECT ('[' || string_agg(CASE WHEN i=1 THEN '1.0' ELSE '0.0' END, ',') || ']')::vector
+      FROM generate_series(1, 384) AS i));
+
+SET ROLE clipstack_app;
+
+DO $$
+DECLARE
+  query_vec vector(384);
+  rec RECORD;
+  ordered_ids UUID[] := ARRAY[]::UUID[];
+  cross_tenant_seen INT := 0;
+BEGIN
+  PERFORM set_config('app.current_company_id', '11111111-1111-1111-1111-111111111111', true);
+
+  -- Query along the X axis. workspace-a's L1 (near-X) should be #1;
+  -- workspace-a's L2 (near-Y) should be #2 (orthogonal-ish);
+  -- workspace-b's L3 must never appear (RLS).
+  query_vec := (SELECT ('[' || string_agg(CASE WHEN i=1 THEN '1.0' ELSE '0.0' END, ',') || ']')::vector
+                  FROM generate_series(1, 384) AS i);
+
+  FOR rec IN
+    SELECT id, company_id
+      FROM company_lessons
+     WHERE scope = 'forever'
+       AND id IN (
+         'cccc1111-cccc-cccc-cccc-cccccccccccc'::uuid,
+         'cccc2222-cccc-cccc-cccc-cccccccccccc'::uuid,
+         'dddd1111-dddd-dddd-dddd-dddddddddddd'::uuid
+       )
+     ORDER BY embedding <=> query_vec
+  LOOP
+    ordered_ids := ordered_ids || rec.id;
+    IF rec.company_id != '11111111-1111-1111-1111-111111111111'::uuid THEN
+      cross_tenant_seen := cross_tenant_seen + 1;
+    END IF;
+  END LOOP;
+
+  -- (a) RLS: cross-tenant rows must NOT appear in the ordered output.
+  IF cross_tenant_seen != 0 THEN
+    RAISE EXCEPTION 'RLS BREACH — workspace-b row appeared in workspace-a cosine query (saw %)', cross_tenant_seen;
+  END IF;
+
+  -- (b) ordering: L1 (near X) first, then L2 (near Y).
+  IF array_length(ordered_ids, 1) != 2 THEN
+    RAISE EXCEPTION 'TEST 7 FAIL — expected 2 workspace-a rows, got %', COALESCE(array_length(ordered_ids, 1), 0);
+  END IF;
+  IF ordered_ids[1] != 'cccc1111-cccc-cccc-cccc-cccccccccccc'::uuid THEN
+    RAISE EXCEPTION 'TEST 7 FAIL (order) — expected L1 first, got %', ordered_ids[1];
+  END IF;
+  IF ordered_ids[2] != 'cccc2222-cccc-cccc-cccc-cccccccccccc'::uuid THEN
+    RAISE EXCEPTION 'TEST 7 FAIL (order) — expected L2 second, got %', ordered_ids[2];
+  END IF;
+
+  RAISE NOTICE 'TEST 7 PASS — cosine ordering correct + RLS scoped lessons across tenants';
+END $$;
+
+RESET ROLE;
+
 \echo '────────────────────────────────────────'
 \echo '  ALL CROSS-TENANT + PGVECTOR ASSERTS PASS  '
 \echo '────────────────────────────────────────'

@@ -92,10 +92,18 @@ model_list:
       timeout: 60
       num_retries: 1
 
-  # ─── Voice embeddings (PII-safe; local-only) ───────────────────────────────
+  # ─── Embeddings (PII-safe; local-only; 384-dim) ────────────────────────────
+  # `voice-embed` profile drives both:
+  #   (a) USP 3 voice fingerprinting (services/voice-scorer)
+  #   (b) USP 5 lesson recall + USP 1 high-performer cosine ranking (the
+  #       /api/companies/[cid]/lessons/recall route + high-performers route's
+  #       optional topic re-rank)
+  # Dimension MUST match the SQL column type (vector(384) since 0007). We use
+  # all-minilm (sentence-transformers/all-MiniLM-L6-v2) which is 384-dim.
+  # Was nomic-embed-text (768) — caused dim mismatch with the column.
   - model_name: voice-embed
     litellm_params:
-      model: ollama/nomic-embed-text
+      model: ollama/all-minilm
       api_base: http://ollama:11434
       timeout: 30
       num_retries: 1
