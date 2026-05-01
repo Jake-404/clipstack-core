@@ -47,9 +47,44 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
 GUARD_MODEL = os.getenv("LLAMA_GUARD_MODEL", "llama-guard3:8b")
 
 
+def _is_production() -> bool:
+    return (
+        os.getenv("ENVIRONMENT", "").lower() == "production"
+        or os.getenv("NODE_ENV", "").lower() == "production"
+    )
+
+
+def _stub_mode_default() -> str:
+    """Dev/test: '1' (stub on — service runs without Llama Guard 3 pulled).
+    Production: '0' (stub off — a forgotten-to-wire deployment fails loudly
+    rather than silently returning verdict='pass' on every prompt+response,
+    which is the worst possible failure mode for a safety classifier)."""
+    return "0" if _is_production() else "1"
+
+
+STUB_MODE: bool = os.getenv("MODERATION_STUB_MODE", _stub_mode_default()) == "1"
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    log.info("startup", service="output-moderation", guard_model=GUARD_MODEL)
+    log.info(
+        "startup",
+        service="output-moderation",
+        stub_mode=STUB_MODE,
+        guard_model=GUARD_MODEL,
+        environment=os.getenv("ENVIRONMENT") or os.getenv("NODE_ENV") or "development",
+    )
+    if STUB_MODE and _is_production():
+        log.warning(
+            "stub_mode_active_in_production",
+            service="output-moderation",
+            message=(
+                "MODERATION_STUB_MODE=1 in production. /moderate returns "
+                "verdict='pass' for every prompt+response. Real safety "
+                "classification is OFF. Wire Llama Guard 3 via Ollama or "
+                "unset MODERATION_STUB_MODE."
+            ),
+        )
     yield
     log.info("shutdown", service="output-moderation")
 
@@ -143,7 +178,7 @@ async def moderate(req: ModerateRequest) -> ModerateResponse:
         kind=req.kind,
     )
 
-    if os.getenv("MODERATION_STUB_MODE", "1") == "1":
+    if STUB_MODE:
         return ModerateResponse(
             request_id=request_id,
             verdict="pass",

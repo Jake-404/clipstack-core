@@ -23,6 +23,7 @@ import { withTenant } from "@/lib/db/client";
 import { approvals } from "@/lib/db/schema/approvals";
 import { auditLog } from "@/lib/db/schema/audit";
 import { companyLessons } from "@/lib/db/schema/lessons";
+import { isUuid } from "@/lib/validation/uuid";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -148,9 +149,3 @@ export const POST = withApi(async (req: NextRequest, ctx: RouteContext) => {
   return ok(result);
 });
 
-// ─── Helpers ─────────────────────────────────────────────────────────────
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-function isUuid(s: string): boolean {
-  return UUID_RE.test(s);
-}

@@ -37,14 +37,43 @@ LITELLM_BASE_URL = os.getenv("LITELLM_BASE_URL", "http://litellm:4000")
 EMBED_PROFILE = os.getenv("VOICE_EMBED_MODEL", "VOICE_EMBED_MODEL")
 
 
+def _is_production() -> bool:
+    return (
+        os.getenv("ENVIRONMENT", "").lower() == "production"
+        or os.getenv("NODE_ENV", "").lower() == "production"
+    )
+
+
+def _stub_mode_default() -> str:
+    """Dev/test: '1' (stub on — service runs without SetFit + Qdrant wired).
+    Production: '0' (stub off — a forgotten-to-wire deployment fails loudly
+    rather than silently passing every draft as score=1.0)."""
+    return "0" if _is_production() else "1"
+
+
+STUB_MODE: bool = os.getenv("VOICE_SCORER_STUB_MODE", _stub_mode_default()) == "1"
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     log.info(
         "startup",
         service="voice-scorer",
+        stub_mode=STUB_MODE,
         qdrant=QDRANT_URL,
         embed_profile=EMBED_PROFILE,
+        environment=os.getenv("ENVIRONMENT") or os.getenv("NODE_ENV") or "development",
     )
+    if STUB_MODE and _is_production():
+        log.warning(
+            "stub_mode_active_in_production",
+            service="voice-scorer",
+            message=(
+                "VOICE_SCORER_STUB_MODE=1 in production. /score returns 1.0 "
+                "(passes everything). Real voice-fingerprint enforcement is OFF. "
+                "Wire SetFit + Qdrant or unset VOICE_SCORER_STUB_MODE."
+            ),
+        )
     yield
     log.info("shutdown", service="voice-scorer")
 
@@ -132,7 +161,7 @@ async def score(req: ScoreRequest) -> ScoreResponse:
         threshold=req.threshold,
     )
 
-    if os.getenv("VOICE_SCORER_STUB_MODE", "1") == "1":
+    if STUB_MODE:
         return ScoreResponse(
             request_id=request_id,
             score=1.0,

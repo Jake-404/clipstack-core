@@ -38,9 +38,42 @@ from pydantic import BaseModel, Field
 log = structlog.get_logger()
 
 
+def _is_production() -> bool:
+    return (
+        os.getenv("ENVIRONMENT", "").lower() == "production"
+        or os.getenv("NODE_ENV", "").lower() == "production"
+    )
+
+
+def _stub_mode_default() -> str:
+    """Dev/test: '1' (stub on — service runs without LightGBM trained).
+    Production: '0' (stub off — a forgotten-to-wire deployment fails loudly
+    rather than silently returning predicted=50 ±15 on every request)."""
+    return "0" if _is_production() else "1"
+
+
+STUB_MODE: bool = os.getenv("PREDICTOR_STUB_MODE", _stub_mode_default()) == "1"
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    log.info("startup", service="percentile-predictor")
+    log.info(
+        "startup",
+        service="percentile-predictor",
+        stub_mode=STUB_MODE,
+        environment=os.getenv("ENVIRONMENT") or os.getenv("NODE_ENV") or "development",
+    )
+    if STUB_MODE and _is_production():
+        log.warning(
+            "stub_mode_active_in_production",
+            service="percentile-predictor",
+            message=(
+                "PREDICTOR_STUB_MODE=1 in production. /predict returns 50 ±15 "
+                "for every draft. Approval-UI should surface 'predictor not "
+                "ready' rather than as confident 50. Wire LightGBM or unset "
+                "PREDICTOR_STUB_MODE."
+            ),
+        )
     yield
     log.info("shutdown", service="percentile-predictor")
 
@@ -157,7 +190,7 @@ async def predict(req: PredictRequest) -> PredictResponse:
         word_count=req.features.word_count or len(req.features.text.split()),
     )
 
-    if os.getenv("PREDICTOR_STUB_MODE", "1") == "1":
+    if STUB_MODE:
         return PredictResponse(
             request_id=request_id,
             predicted_percentile=50.0,

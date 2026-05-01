@@ -9,6 +9,7 @@
 // is final — only the implementation behind it changes when WorkOS lands.
 
 import { ApiError } from "./errors";
+import { isUuid } from "@/lib/validation/uuid";
 
 export interface SessionContext {
   userId: string;
@@ -44,6 +45,16 @@ export async function resolveSession(): Promise<SessionContext> {
   }
 
   if (allSet) {
+    // Hard rule: AUTH_STUB_* MUST NOT bypass auth in production. A deployment
+    // that accidentally sets these would silently grant every request fake
+    // owner-role access. Refuse loudly instead.
+    if (process.env.NODE_ENV === "production") {
+      throw new ApiError(
+        "internal",
+        "AUTH_STUB_USER_ID / AUTH_STUB_COMPANY_ID detected with NODE_ENV=production. " +
+          "Stub auth is for dev/test only. Configure WorkOS or remove the stub vars.",
+      );
+    }
     return {
       userId: userId!,
       activeCompanyId: companyId!,
@@ -99,7 +110,7 @@ export function resolveServiceContext(headers: Headers): ServiceContext | null {
       "service-token requests must include X-Clipstack-Active-Company",
     );
   }
-  if (!UUID_RE.test(companyHeader)) {
+  if (!isUuid(companyHeader)) {
     throw new ApiError("bad_request", "X-Clipstack-Active-Company must be a UUID");
   }
 
@@ -124,8 +135,6 @@ export async function resolveServiceOrSession(
   if (service) return service;
   return resolveSession();
 }
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Constant-time string compare to prevent token-timing attacks. */
 function constantTimeEqual(a: string, b: string): boolean {

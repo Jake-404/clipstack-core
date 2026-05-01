@@ -13,11 +13,13 @@ import { z } from "zod";
 import { and, desc, eq, gte, isNotNull } from "drizzle-orm";
 
 import { resolveServiceOrSession } from "@/lib/api/auth";
+import { auditAccess } from "@/lib/api/audit";
 import { badRequest, forbidden, validationFailed } from "@/lib/api/errors";
 import { ok, withApi } from "@/lib/api/respond";
 import { withTenant } from "@/lib/db/client";
 import { drafts } from "@/lib/db/schema/drafts";
 import { postMetrics } from "@/lib/db/schema/post-metrics";
+import { isUuid } from "@/lib/validation/uuid";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -64,7 +66,7 @@ export const GET = withApi(async (req: NextRequest, ctx: RouteContext) => {
   const ctxAuth = await resolveServiceOrSession(req.headers);
   const { companyId } = await ctx.params;
 
-  if (!UUID_RE.test(companyId)) badRequest("invalid companyId");
+  if (!isUuid(companyId)) badRequest("invalid companyId");
 
   // Authorisation — caller's active workspace must match the URL param.
   // Service tokens carry the active company in their context; user sessions
@@ -98,7 +100,7 @@ export const GET = withApi(async (req: NextRequest, ctx: RouteContext) => {
     ];
     if (platform) conditions.push(eq(postMetrics.platform, platform));
 
-    return tx
+    const result = await tx
       .select({
         draftId: drafts.id,
         channel: drafts.channel,
@@ -115,6 +117,26 @@ export const GET = withApi(async (req: NextRequest, ctx: RouteContext) => {
       .where(and(...conditions))
       .orderBy(desc(valueColumn))
       .limit(k);
+
+    // Audit cross-tenant data access. Service-token reads MUST be auditable;
+    // user-session reads are audited too for consistency. Same txn so audit
+    // is atomic with the read it audits.
+    await auditAccess({
+      tx,
+      ctx: ctxAuth,
+      companyId,
+      kind: "drafts.read.high_performers",
+      details: {
+        kpi,
+        percentile,
+        k,
+        platform: platform ?? null,
+        topic: topic ?? null,
+        resultCount: result.length,
+      },
+    });
+
+    return result;
   });
 
   return ok({
@@ -167,5 +189,3 @@ function excerpt(s: string, max: number): string {
   if (s.length <= max) return s;
   return s.slice(0, max - 1).trimEnd() + "…";
 }
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

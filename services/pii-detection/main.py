@@ -32,9 +32,47 @@ from pydantic import BaseModel, Field
 log = structlog.get_logger()
 
 
+def _is_production() -> bool:
+    """True when the deployment self-identifies as production via env vars."""
+    return (
+        os.getenv("ENVIRONMENT", "").lower() == "production"
+        or os.getenv("NODE_ENV", "").lower() == "production"
+    )
+
+
+def _stub_mode_default() -> str:
+    """Default for PII_STUB_MODE.
+
+    Dev/test: '1' (stub on — service runs without Presidio wired).
+    Production: '0' (stub off — a deployment that forgot to wire the real
+    backend will fail loudly with NotImplementedError rather than silently
+    serve fake 'no PII detected' responses on real customer data.)
+    """
+    return "0" if _is_production() else "1"
+
+
+STUB_MODE: bool = os.getenv("PII_STUB_MODE", _stub_mode_default()) == "1"
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    log.info("startup", service="pii-detection")
+    log.info(
+        "startup",
+        service="pii-detection",
+        stub_mode=STUB_MODE,
+        environment=os.getenv("ENVIRONMENT") or os.getenv("NODE_ENV") or "development",
+    )
+    if STUB_MODE and _is_production():
+        # Allowed (operator opted in via explicit PII_STUB_MODE=1) but loud.
+        log.warning(
+            "stub_mode_active_in_production",
+            service="pii-detection",
+            message=(
+                "PII_STUB_MODE=1 in a production environment. /scan and /redact "
+                "will return empty detections. Real customer data will pass "
+                "through unscanned. Wire Presidio or unset PII_STUB_MODE."
+            ),
+        )
     yield
     log.info("shutdown", service="pii-detection")
 
@@ -146,7 +184,7 @@ async def scan(req: ScanRequest) -> ScanResponse:
         score_threshold=req.score_threshold,
     )
 
-    if os.getenv("PII_STUB_MODE", "1") == "1":
+    if STUB_MODE:
         return ScanResponse(request_id=request_id, detections=[], skipped=True)
 
     # A.2: Presidio analyzer call lands here.
@@ -170,7 +208,7 @@ async def redact(req: RedactRequest) -> RedactResponse:
         mode=req.mode,
     )
 
-    if os.getenv("PII_STUB_MODE", "1") == "1":
+    if STUB_MODE:
         return RedactResponse(
             request_id=request_id,
             redacted_text=req.text,

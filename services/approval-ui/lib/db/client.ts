@@ -51,6 +51,10 @@ export function getDb(): DrizzleDB {
 
 export type DB = DrizzleDB;
 
+/** The transaction-bound client passed to `withTenant(...)` callbacks.
+ *  Exported so helpers (audit, etc.) can take it as a typed parameter. */
+export type Tx = Parameters<Parameters<DB["transaction"]>[0]>[0];
+
 /**
  * Run `fn` inside a transaction with `app.current_company_id` set to
  * `companyId`. RLS policies in 0002_enable_rls.sql will filter every
