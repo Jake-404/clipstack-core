@@ -11,10 +11,12 @@ WORKDIR /app
 RUN pip install --no-cache-dir uv==0.5.4
 
 COPY pyproject.toml ./
-# Stub mode — base deps only. The `[ml]` extra (LightGBM + numpy + pandas)
-# adds in the follow-up slice when training is wired; pulling now adds ~400MB
-# without a use.
-RUN uv pip install --system --no-cache .
+# Real backend image — install the `[ml]` extra so LightGBM + numpy are
+# available at /predict and /train time. The CI lint matrix installs only
+# `[dev]` so ruff stays fast (heavy ML deps are skipped there). Image
+# size: ~400MB on top of python:3.11-slim, which is the right call once
+# real workspaces have enough samples to train.
+RUN uv pip install --system --no-cache '.[ml]'
 
 COPY . .
 
