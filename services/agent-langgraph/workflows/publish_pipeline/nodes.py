@@ -1,20 +1,31 @@
 """Node implementations for the publish pipeline.
 
-Phase A.0 ships node functions with stub bodies — they update state correctly
-but don't make external calls. Real wiring (LiteLLM critic call, voice-scorer
-HTTP, channel publisher adapter, USP 5 record_lesson, USP 10 meter_events
-insert) lands in A.2.
+Phase A.0 shipped node functions with stub bodies. A.2 introduced the typed
+shape; A.3 (this revision) adds the real-time tier nodes:
+  - percentile_gate     : calls percentile-predictor before approval
+  - bandit_allocate     : calls bandit-orchestrator before publish
+
+Both gated by EVENTBUS_ENABLED — when the bus tier is off, both nodes
+short-circuit (pass-through), so the pipeline still works without
+Redpanda + percentile-predictor + bandit-orchestrator running.
 
 Each node returns a *partial* state dict — LangGraph merges.
 """
 
 from __future__ import annotations
 
+import os
+
+import httpx
 import structlog
 
 from .state import PublishState
 
 log = structlog.get_logger()
+
+EVENTBUS_ENABLED: bool = os.getenv("EVENTBUS_ENABLED", "false").lower() == "true"
+PERCENTILE_PREDICTOR_BASE_URL = os.getenv("PERCENTILE_PREDICTOR_BASE_URL")
+BANDIT_ORCHESTRATOR_BASE_URL = os.getenv("BANDIT_ORCHESTRATOR_BASE_URL")
 
 
 # ─── Review-cycle nodes ──────────────────────────────────────────────────────
@@ -37,7 +48,7 @@ def review_cycle(state: PublishState) -> dict:
 
 
 def should_revise(state: PublishState) -> str:
-    """Conditional edge: revise → review_cycle, pass → awaiting_human_approval, block → END."""
+    """Conditional edge: revise → review_cycle, pass → percentile_gate, block → END."""
     verdict = state.get("last_review_verdict")
     rev = state.get("revision_count", 0)
     max_rev = state.get("max_revisions", 3)
@@ -45,6 +56,106 @@ def should_revise(state: PublishState) -> str:
     if verdict == "revise" and rev < max_rev:
         return "review_cycle"
     if verdict == "block":
+        return "record_block_lesson"
+    return "percentile_gate"
+
+
+# ─── Percentile gate (Doc 4 §2.4) ────────────────────────────────────────────
+
+
+def percentile_gate(state: PublishState) -> dict:
+    """Pre-publish prediction call. When EVENTBUS_ENABLED + the predictor URL
+    are set, POST to the predictor's /predict endpoint and store the result
+    on state. When the workspace has `min_percentile_threshold` configured
+    AND the predicted percentile falls below it, the next conditional edge
+    routes back to review_cycle for another revision pass.
+
+    Fail-open: predictor outage / non-200 / network error returns
+    predicted=None and the gate passes through. A real-time tier outage
+    shouldn't block every draft on the agent side.
+    """
+    run_id = state.get("run_id")
+    if not (EVENTBUS_ENABLED and PERCENTILE_PREDICTOR_BASE_URL):
+        log.debug("percentile_gate.passthrough", run_id=run_id)
+        return {
+            "predicted_percentile": None,
+            "predicted_percentile_low": None,
+            "predicted_percentile_high": None,
+            "gate_blocked": False,
+        }
+
+    url = f"{PERCENTILE_PREDICTOR_BASE_URL.rstrip('/')}/predict"
+    body = {
+        "company_id": state.get("company_id"),
+        "kpi": "engagement_rate",
+        "features": {
+            "text": state.get("draft_text", ""),
+            "channel": state.get("channel", "x"),
+            "scheduled_for": state.get("scheduled_at"),
+            "voice_score": state.get("voice_score"),
+            # claim_count + word_count + has_media + hashtags would land here
+            # in a future slice when content_factory hands off the structured
+            # draft envelope rather than just text.
+        },
+    }
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.post(url, json=body)
+    except (httpx.HTTPError, OSError) as e:
+        log.warning("percentile_gate.http_error", run_id=run_id, error=str(e))
+        return {
+            "predicted_percentile": None,
+            "predicted_percentile_low": None,
+            "predicted_percentile_high": None,
+            "gate_blocked": False,
+        }
+
+    if resp.status_code != 200:
+        log.warning("percentile_gate.bad_status", run_id=run_id, status=resp.status_code)
+        return {
+            "predicted_percentile": None,
+            "predicted_percentile_low": None,
+            "predicted_percentile_high": None,
+            "gate_blocked": False,
+        }
+
+    data = resp.json()
+    predicted = data.get("predicted_percentile")
+    low = data.get("confidence_low")
+    high = data.get("confidence_high")
+
+    threshold = state.get("min_percentile_threshold")
+    blocked = (
+        threshold is not None
+        and predicted is not None
+        and predicted < threshold
+    )
+    if blocked:
+        log.info(
+            "percentile_gate.blocked",
+            run_id=run_id,
+            predicted=predicted,
+            threshold=threshold,
+        )
+
+    return {
+        "predicted_percentile": predicted,
+        "predicted_percentile_low": low,
+        "predicted_percentile_high": high,
+        "gate_blocked": bool(blocked),
+    }
+
+
+def route_percentile_gate(state: PublishState) -> str:
+    """If gate_blocked, push the draft back to review_cycle for another pass.
+    Otherwise proceed to awaiting_human_approval. Max-revisions cap on the
+    review_cycle side prevents infinite loops."""
+    if state.get("gate_blocked"):
+        rev = state.get("revision_count", 0)
+        max_rev = state.get("max_revisions", 3)
+        if rev < max_rev:
+            return "review_cycle"
+        # Out of revision budget AND below threshold — record as block.
         return "record_block_lesson"
     return "awaiting_human_approval"
 
@@ -64,10 +175,60 @@ def awaiting_human_approval(state: PublishState) -> dict:
 def route_approval(state: PublishState) -> str:
     decision = state.get("approval_decision", "pending")
     if decision == "approve":
-        return "publish_to_channel"
+        return "bandit_allocate"
     if decision == "deny":
         return "record_deny_lesson"
     return "awaiting_human_approval"  # still waiting
+
+
+# ─── Bandit allocation (Doc 4 §2.3) ──────────────────────────────────────────
+
+
+def bandit_allocate(state: PublishState) -> dict:
+    """Pre-publish bandit allocation. When EVENTBUS_ENABLED + the orchestrator
+    URL are set AND state carries a bandit_id (the strategist registered arms
+    upstream), call /bandits/:id/allocate to pick the variant. Tag the result
+    onto state so publish_to_channel emits content.published with variant_id
+    for reward attribution.
+
+    Pass-through: when the bus is off OR no bandit_id was registered, this
+    node is a no-op. The publish_to_channel node still works.
+
+    Fail-open: outages don't block publish. A bandit-orchestrator outage
+    means the draft publishes without bandit attribution; reward signals
+    rejoin the system on the next allocation cycle.
+    """
+    run_id = state.get("run_id")
+    bandit_id = state.get("bandit_id")
+
+    if not bandit_id:
+        log.debug("bandit_allocate.no_bandit_registered", run_id=run_id)
+        return {}
+
+    if not (EVENTBUS_ENABLED and BANDIT_ORCHESTRATOR_BASE_URL):
+        log.debug("bandit_allocate.passthrough", run_id=run_id, bandit_id=bandit_id)
+        return {}
+
+    url = f"{BANDIT_ORCHESTRATOR_BASE_URL.rstrip('/')}/bandits/{bandit_id}/allocate"
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.post(
+                url,
+                json={"company_id": state.get("company_id"), "bandit_id": bandit_id},
+            )
+    except (httpx.HTTPError, OSError) as e:
+        log.warning("bandit_allocate.http_error", run_id=run_id, error=str(e))
+        return {}
+
+    if resp.status_code != 200:
+        log.warning("bandit_allocate.bad_status", run_id=run_id, status=resp.status_code)
+        return {}
+
+    data = resp.json()
+    return {
+        "bandit_variant_id": data.get("variant_id"),
+        "bandit_arm_score": data.get("arm_score"),
+    }
 
 
 # ─── Lesson capture (USP 5) ──────────────────────────────────────────────────
