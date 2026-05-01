@@ -71,22 +71,31 @@ jobs:
       - run: docker compose config --quiet
 
   rls-integration:
-    # DoD A.1.1 — applies migrations 0001..0006 against an ephemeral
-    # Postgres, then runs cross-tenant-rls.sql which asserts:
+    # DoD A.1.1 — applies migrations 0001..0007 against an ephemeral Postgres,
+    # then runs cross-tenant-rls.sql which asserts:
     #   1. No-tenant session sees zero rows (fail-closed default).
     #   2. Tenant-A context sees A's rows; cross-tenant reads return 0.
     #   3. Cross-tenant INSERT denied by RLS WITH CHECK.
     #   4. Switching app.current_company_id flips visibility.
     #   5. include_client_children flag widens reads to nested tenants
     #      ONLY when set (proves opt-in semantics).
+    #   6. pgvector extension present + 384-d vector roundtrips through
+    #      company_lessons.embedding + cosine self-distance ≈ 0.
     #
-    # Catches the bug class typecheck/build/ruff don't: an RLS policy
-    # regression that allows a session to read or write across tenants.
+    # Catches the bug class typecheck/build/ruff don't:
+    #   - RLS policy regression (cross-tenant data leak)
+    #   - pgvector extension missing in the deploy target
+    #   - vector(384) column type or dim drift
     name: cross-tenant RLS integration
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16-alpine
+        # postgres:16 (Debian) + apt-installed postgresql-16-pgvector lands
+        # the extension reliably. The pgvector/pgvector:pg16 image was tried
+        # first; its .control files weren't visible in GH Actions service
+        # containers (extension reported "not available" by CREATE EXTENSION).
+        # Debian + apt is the boring-but-works path.
+        image: postgres:16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -103,6 +112,21 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install psql client
         run: sudo apt-get install -y --no-install-recommends postgresql-client
+      - name: Install pgvector in service container
+        # The service container starts from postgres:16 without pgvector.
+        # apt-installs postgresql-16-pgvector + verifies the .control file
+        # is now visible via pg_available_extensions. CREATE EXTENSION at
+        # migration time picks it up; no postgres restart needed (pgvector
+        # doesn't require shared_preload_libraries).
+        run: |
+          docker exec --user root ${{ job.services.postgres.id }} bash -c "
+            apt-get update >/dev/null
+            apt-get install -y --no-install-recommends postgresql-16-pgvector
+          "
+          PGPASSWORD=postgres psql -h localhost -U postgres -d postgres \
+            -tAc "SELECT name FROM pg_available_extensions WHERE name='vector';" \
+            | grep -q '^vector$' \
+            || { echo "pgvector not available after install"; exit 1; }
       - name: Run cross-tenant RLS test
         env:
           PGHOST: localhost
