@@ -69,3 +69,47 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker compose config --quiet
+
+  rls-integration:
+    # DoD A.1.1 — applies migrations 0001..0006 against an ephemeral
+    # Postgres, then runs cross-tenant-rls.sql which asserts:
+    #   1. No-tenant session sees zero rows (fail-closed default).
+    #   2. Tenant-A context sees A's rows; cross-tenant reads return 0.
+    #   3. Cross-tenant INSERT denied by RLS WITH CHECK.
+    #   4. Switching app.current_company_id flips visibility.
+    #   5. include_client_children flag widens reads to nested tenants
+    #      ONLY when set (proves opt-in semantics).
+    #
+    # Catches the bug class typecheck/build/ruff don't: an RLS policy
+    # regression that allows a session to read or write across tenants.
+    name: cross-tenant RLS integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        # Healthcheck — workflow steps don't run until pg_isready returns 0.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install psql client
+        run: sudo apt-get install -y --no-install-recommends postgresql-client
+      - name: Run cross-tenant RLS test
+        env:
+          PGHOST: localhost
+          PGPORT: 5432
+          PGUSER: postgres
+          PGPASSWORD: postgres
+          PGDATABASE: clipstack_test
+        run: |
+          chmod +x tests/integration/run-rls-test.sh
+          ./tests/integration/run-rls-test.sh
