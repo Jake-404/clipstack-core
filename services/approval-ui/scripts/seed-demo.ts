@@ -20,7 +20,7 @@
 
 import { and, eq } from "drizzle-orm";
 
-import { getDb } from "@/lib/db/client";
+import { withTenant } from "@/lib/db/client";
 import {
   agents,
   approvals,
@@ -422,362 +422,373 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const db = getDb();
+  // Run the entire seed inside a single tenant-scoped transaction. This
+  // sets `app.current_company_id = DEMO_COMPANY_ID` at the session level so
+  // every RLS-filtered statement passes — required because the application
+  // user `clipstack_app` (the documented role behind DATABASE_URL) is
+  // NOBYPASSRLS. Without this wrapper every DELETE silently affects 0 rows
+  // and the company INSERT fails the WITH CHECK predicate (`id = active`).
+  //
+  // The DEMO_COMPANY_ID is the value the policy compares against on both
+  // the companies table (`id = app_current_company_id()`) and every child
+  // table (`app_company_matches(company_id)`), so wiping + reinserting the
+  // demo tenant works inside one txn.
+  await withTenant(DEMO_COMPANY_ID, async (tx) => {
+    console.log("[seed] wiping any prior demo-tenant rows for idempotency...");
+    // Order matters — children before parents. Most tables ON DELETE CASCADE
+    // off companies, but cleaning explicitly keeps the script obvious.
+    await tx.delete(meterEvents).where(eq(meterEvents.companyId, DEMO_COMPANY_ID));
+    await tx.delete(auditLog).where(eq(auditLog.companyId, DEMO_COMPANY_ID));
+    await tx.delete(companyLessons).where(eq(companyLessons.companyId, DEMO_COMPANY_ID));
+    await tx.delete(postMetrics).where(eq(postMetrics.companyId, DEMO_COMPANY_ID));
+    // drafts.approval_id has no FK enforced in Drizzle (cycle break) but the
+    // DB FK is deferred; clear approvals first via the draft cascade trick:
+    // null out drafts.approvalId, then delete approvals, then drafts, then agents.
+    await tx
+      .update(drafts)
+      .set({ approvalId: null })
+      .where(eq(drafts.companyId, DEMO_COMPANY_ID));
+    await tx.delete(approvals).where(eq(approvals.companyId, DEMO_COMPANY_ID));
+    await tx.delete(drafts).where(eq(drafts.companyId, DEMO_COMPANY_ID));
+    await tx.delete(agents).where(eq(agents.companyId, DEMO_COMPANY_ID));
+    await tx.delete(memberships).where(eq(memberships.companyId, DEMO_COMPANY_ID));
+    // Don't drop the user yet — keep workosUserId stable across runs.
+    await tx.delete(companies).where(eq(companies.id, DEMO_COMPANY_ID));
 
-  console.log("[seed] wiping any prior demo-tenant rows for idempotency...");
-  // Order matters — children before parents. Most tables ON DELETE CASCADE
-  // off companies, but cleaning explicitly keeps the script obvious.
-  await db.delete(meterEvents).where(eq(meterEvents.companyId, DEMO_COMPANY_ID));
-  await db.delete(auditLog).where(eq(auditLog.companyId, DEMO_COMPANY_ID));
-  await db.delete(companyLessons).where(eq(companyLessons.companyId, DEMO_COMPANY_ID));
-  await db.delete(postMetrics).where(eq(postMetrics.companyId, DEMO_COMPANY_ID));
-  // drafts.approval_id has no FK enforced in Drizzle (cycle break) but the
-  // DB FK is deferred; clear approvals first via the draft cascade trick:
-  // null out drafts.approvalId, then delete approvals, then drafts, then agents.
-  await db
-    .update(drafts)
-    .set({ approvalId: null })
-    .where(eq(drafts.companyId, DEMO_COMPANY_ID));
-  await db.delete(approvals).where(eq(approvals.companyId, DEMO_COMPANY_ID));
-  await db.delete(drafts).where(eq(drafts.companyId, DEMO_COMPANY_ID));
-  await db.delete(agents).where(eq(agents.companyId, DEMO_COMPANY_ID));
-  await db.delete(memberships).where(eq(memberships.companyId, DEMO_COMPANY_ID));
-  // Don't drop the user yet — keep workosUserId stable across runs.
-  await db.delete(companies).where(eq(companies.id, DEMO_COMPANY_ID));
+    console.log("[seed] inserting Demo Workspace company + user + membership...");
 
-  console.log("[seed] inserting Demo Workspace company + user + membership...");
-
-  await db
-    .insert(companies)
-    .values({
-      id: DEMO_COMPANY_ID,
-      name: "Demo Workspace",
-      type: "in_house",
-      uiMode: "web2",
-      // companies has no slug/website columns; stash on contextJson per the
-      // schema's documented escape hatch.
-      contextJson: {
-        slug: "demo",
-        website: "https://demo.clipstack.app",
-        seedSource: "scripts/seed-demo.ts",
-      },
-    })
-    .onConflictDoNothing();
-
-  await db
-    .insert(users)
-    .values({
-      id: DEMO_USER_ID,
-      email: "demo@clipstack.app",
-      name: "Demo User",
-      workosUserId: "demo_user_v1",
-      uiMode: "web2",
-    })
-    .onConflictDoNothing();
-
-  // Owner role is auto-seeded by the trigger in 0003_rbac_seed.sql when the
-  // company row is inserted. Look it up here to bind the membership.
-  const ownerRoleRow = await db
-    .select({ id: roles.id })
-    .from(roles)
-    .where(and(eq(roles.companyId, DEMO_COMPANY_ID), eq(roles.slug, "owner")))
-    .limit(1);
-  const ownerRoleId = ownerRoleRow[0]?.id;
-  if (!ownerRoleId) {
-    throw new Error(
-      "[seed] owner role not found — the 0003_rbac_seed trigger should auto-seed it on company insert. Check that migration 0003 has been applied.",
-    );
-  }
-
-  await db
-    .insert(memberships)
-    .values({
-      id: DEMO_MEMBERSHIP_ID,
-      userId: DEMO_USER_ID,
-      companyId: DEMO_COMPANY_ID,
-      roleId: ownerRoleId,
-    })
-    .onConflictDoNothing();
-
-  console.log(`[seed] inserting ${AGENT_SPECS.length} agents...`);
-  const agentValues: NewAgent[] = AGENT_SPECS.map((spec, i) => ({
-    id: stableUuid(1, i),
-    companyId: DEMO_COMPANY_ID,
-    role: spec.role,
-    displayName: spec.displayName,
-    jobDescription: spec.jobDescription,
-    status: spec.status,
-    modelProfile: "WRITER_MODEL",
-    toolsAllowed: ["asset.generate", "draft.publish", "lesson.record"],
-  }));
-  await db.insert(agents).values(agentValues).onConflictDoNothing();
-
-  console.log(`[seed] inserting ${DRAFT_SPECS.length} drafts + matching approvals...`);
-  // Round-robin draft authorship across the four "writer-ish" agents
-  // (orchestrator + strategist + long_form_writer + social_adapter).
-  const writerAgentIds = [
-    agentValues[0]?.id, // orchestrator
-    agentValues[1]?.id, // strategist
-    agentValues[2]?.id, // long_form_writer
-    agentValues[3]?.id, // social_adapter
-  ].filter((id): id is string => Boolean(id));
-
-  // Pre-compute draft IDs so the approval-binding step below can reference
-  // them as plain `string` (no `as string` casts, no `?? ""` fallbacks).
-  const draftIds: string[] = DRAFT_SPECS.map((_, i) => stableUuid(2, i));
-
-  const draftValues: NewDraft[] = DRAFT_SPECS.map((spec, i) => {
-    const created = minutesAgo(spec.ageMinutes);
-    const authorId = writerAgentIds[i % writerAgentIds.length];
-    return {
-      id: draftIds[i],
-      companyId: DEMO_COMPANY_ID,
-      channel: spec.channel,
-      status: spec.status,
-      title: spec.title,
-      body: spec.body,
-      hashtags: spec.hashtags,
-      voiceScore: spec.status === "denied" ? 0.41 : 0.78 + (i % 5) * 0.03,
-      predictedPercentile: spec.predictedPercentile,
-      authoredByAgentId: authorId ?? null,
-      createdAt: created,
-      updatedAt: created,
-      // publishedAt only for published drafts
-      publishedAt: spec.status === "published" ? created : null,
-      publishedUrl:
-        spec.status === "published"
-          ? `https://demo.clipstack.app/p/${i}-${spec.channel}`
-          : null,
-    };
-  });
-  await db.insert(drafts).values(draftValues).onConflictDoNothing();
-
-  // Build approval rows: one per draft that needs human action.
-  // - awaiting_approval / in_review → status=pending
-  // - denied → status=denied + denyRationale + denyScope
-  const approvalRows: { draftIdx: number; approvalId: string; approval: NewApproval }[] = [];
-  let approvalCounter = 0;
-  for (let i = 0; i < DRAFT_SPECS.length; i++) {
-    const spec = DRAFT_SPECS[i];
-    const draftRow = draftValues[i];
-    const draftId = draftIds[i];
-    if (!spec || !draftRow || !draftId) continue;
-
-    if (spec.status === "awaiting_approval" || spec.status === "in_review") {
-      const approvalId = stableUuid(3, approvalCounter++);
-      approvalRows.push({
-        draftIdx: i,
-        approvalId,
-        approval: {
-          id: approvalId,
-          companyId: DEMO_COMPANY_ID,
-          kind: "draft_publish",
-          status: "pending",
-          payload: {
-            draftId,
-            channel: spec.channel,
-            predictedPercentile: spec.predictedPercentile,
-          },
-          createdByAgentId: draftRow.authoredByAgentId ?? null,
-          createdAt: minutesAgo(spec.ageMinutes - 1),
+    await tx
+      .insert(companies)
+      .values({
+        id: DEMO_COMPANY_ID,
+        name: "Demo Workspace",
+        type: "in_house",
+        uiMode: "web2",
+        // companies has no slug/website columns; stash on contextJson per the
+        // schema's documented escape hatch.
+        contextJson: {
+          slug: "demo",
+          website: "https://demo.clipstack.app",
+          seedSource: "scripts/seed-demo.ts",
         },
-      });
-    } else if (spec.status === "denied") {
-      const approvalId = stableUuid(3, approvalCounter++);
-      approvalRows.push({
-        draftIdx: i,
-        approvalId,
-        approval: {
-          id: approvalId,
-          companyId: DEMO_COMPANY_ID,
-          kind: "draft_publish",
-          status: "denied",
-          payload: {
-            draftId,
-            channel: spec.channel,
-          },
-          createdByAgentId: draftRow.authoredByAgentId ?? null,
-          createdAt: minutesAgo(spec.ageMinutes + 30),
-          decidedByUserId: DEMO_USER_ID,
-          decidedAt: minutesAgo(spec.ageMinutes),
-          denyRationale:
-            "Hyperbolic claim without supporting evidence — 'orders of magnitude' needs a benchmark and 'period' is hostile sign-off. Rewrite without the superlatives.",
-          denyScope: "forever",
-        },
-      });
-    }
-  }
-  if (approvalRows.length > 0) {
-    await db
-      .insert(approvals)
-      .values(approvalRows.map((r) => r.approval))
+      })
       .onConflictDoNothing();
-    // Back-link drafts.approvalId so the inbox query joins cleanly.
-    for (const row of approvalRows) {
-      const draftId = draftIds[row.draftIdx];
-      if (!draftId) continue;
-      await db
-        .update(drafts)
-        .set({ approvalId: row.approvalId })
-        .where(eq(drafts.id, draftId));
+
+    await tx
+      .insert(users)
+      .values({
+        id: DEMO_USER_ID,
+        email: "demo@clipstack.app",
+        name: "Demo User",
+        workosUserId: "demo_user_v1",
+        uiMode: "web2",
+      })
+      .onConflictDoNothing();
+
+    // Owner role is auto-seeded by the trigger in 0003_rbac_seed.sql when the
+    // company row is inserted. Look it up here to bind the membership.
+    const ownerRoleRow = await tx
+      .select({ id: roles.id })
+      .from(roles)
+      .where(and(eq(roles.companyId, DEMO_COMPANY_ID), eq(roles.slug, "owner")))
+      .limit(1);
+    const ownerRoleId = ownerRoleRow[0]?.id;
+    if (!ownerRoleId) {
+      throw new Error(
+        "[seed] owner role not found — the 0003_rbac_seed trigger should auto-seed it on company insert. Check that migration 0003 has been applied.",
+      );
     }
-  }
 
-  console.log("[seed] inserting post_metrics for the 4 published drafts...");
-  const publishedIndices = DRAFT_SPECS
-    .map((spec, i) => ({ spec, i }))
-    .filter(({ spec }) => spec.status === "published")
-    .map(({ i }) => i);
-
-  const metricRows: NewPostMetric[] = [];
-  let metricCounter = 0;
-  for (const draftIdx of publishedIndices) {
-    const spec = DRAFT_SPECS[draftIdx];
-    const draftId = draftIds[draftIdx];
-    if (!spec || !draftId) continue;
-    // Generate ~10 snapshots over the last 7 days for each. Realistic
-    // monotonic-ish growth so the trend chart slopes upward.
-    for (let snap = 0; snap < 10; snap++) {
-      const seed = draftIdx * 100 + snap;
-      const ageHours = 24 * 7 - snap * 16; // ~16h between snapshots
-      const impressionsBase = 5000 + Math.floor(rand(seed) * 45_000);
-      const impressions = Math.floor(impressionsBase * (0.4 + snap * 0.07));
-      const ctr = 0.01 + rand(seed + 1) * 0.04; // 1-5%
-      const clicks = Math.floor(impressions * ctr);
-      const reactions = Math.floor(clicks * (0.08 + rand(seed + 2) * 0.04));
-      const shares = Math.floor(reactions * (0.01 + rand(seed + 3) * 0.02));
-      const comments = Math.floor(reactions * 0.15);
-      const saves = Math.floor(reactions * 0.05);
-      const conversions = Math.floor(clicks * (0.005 + rand(seed + 4) * 0.015));
-      const engagementRate =
-        impressions > 0 ? (reactions + comments + shares + saves) / impressions : 0;
-      const conversionRate = clicks > 0 ? conversions / clicks : 0;
-
-      metricRows.push({
-        id: stableUuid(4, metricCounter++),
+    await tx
+      .insert(memberships)
+      .values({
+        id: DEMO_MEMBERSHIP_ID,
+        userId: DEMO_USER_ID,
         companyId: DEMO_COMPANY_ID,
-        draftId,
-        platform: spec.channel,
-        snapshotAt: new Date(Date.now() - ageHours * 60 * 60 * 1000),
-        impressions,
-        reach: Math.floor(impressions * 0.85),
-        clicks,
-        reactions,
-        comments,
-        shares,
-        saves,
-        conversions,
-        ctr,
-        engagementRate,
-        conversionRate,
-        ctrPercentile: 30 + rand(seed + 5) * 60,
-        engagementPercentile: 30 + rand(seed + 6) * 60,
-        conversionPercentile: 30 + rand(seed + 7) * 60,
-        raw: { source: "seed-demo" },
+        roleId: ownerRoleId,
+      })
+      .onConflictDoNothing();
+
+    console.log(`[seed] inserting ${AGENT_SPECS.length} agents...`);
+    const agentValues: NewAgent[] = AGENT_SPECS.map((spec, i) => ({
+      id: stableUuid(1, i),
+      companyId: DEMO_COMPANY_ID,
+      role: spec.role,
+      displayName: spec.displayName,
+      jobDescription: spec.jobDescription,
+      status: spec.status,
+      modelProfile: "WRITER_MODEL",
+      toolsAllowed: ["asset.generate", "draft.publish", "lesson.record"],
+    }));
+    await tx.insert(agents).values(agentValues).onConflictDoNothing();
+
+    console.log(`[seed] inserting ${DRAFT_SPECS.length} drafts + matching approvals...`);
+    // Round-robin draft authorship across the four "writer-ish" agents
+    // (orchestrator + strategist + long_form_writer + social_adapter).
+    const writerAgentIds = [
+      agentValues[0]?.id, // orchestrator
+      agentValues[1]?.id, // strategist
+      agentValues[2]?.id, // long_form_writer
+      agentValues[3]?.id, // social_adapter
+    ].filter((id): id is string => Boolean(id));
+
+    // Pre-compute draft IDs so the approval-binding step below can reference
+    // them as plain `string` (no `as string` casts, no `?? ""` fallbacks).
+    const draftIds: string[] = DRAFT_SPECS.map((_, i) => stableUuid(2, i));
+
+    const draftValues: NewDraft[] = DRAFT_SPECS.map((spec, i) => {
+      const created = minutesAgo(spec.ageMinutes);
+      const authorId = writerAgentIds[i % writerAgentIds.length];
+      return {
+        id: draftIds[i],
+        companyId: DEMO_COMPANY_ID,
+        channel: spec.channel,
+        status: spec.status,
+        title: spec.title,
+        body: spec.body,
+        hashtags: spec.hashtags,
+        voiceScore: spec.status === "denied" ? 0.41 : 0.78 + (i % 5) * 0.03,
+        predictedPercentile: spec.predictedPercentile,
+        authoredByAgentId: authorId ?? null,
+        createdAt: created,
+        updatedAt: created,
+        // publishedAt only for published drafts
+        publishedAt: spec.status === "published" ? created : null,
+        publishedUrl:
+          spec.status === "published"
+            ? `https://demo.clipstack.app/p/${i}-${spec.channel}`
+            : null,
+      };
+    });
+    await tx.insert(drafts).values(draftValues).onConflictDoNothing();
+
+    // Build approval rows: one per draft that needs human action.
+    // - awaiting_approval / in_review → status=pending
+    // - denied → status=denied + denyRationale + denyScope
+    const approvalRows: { draftIdx: number; approvalId: string; approval: NewApproval }[] = [];
+    let approvalCounter = 0;
+    for (let i = 0; i < DRAFT_SPECS.length; i++) {
+      const spec = DRAFT_SPECS[i];
+      const draftRow = draftValues[i];
+      const draftId = draftIds[i];
+      if (!spec || !draftRow || !draftId) continue;
+
+      if (spec.status === "awaiting_approval" || spec.status === "in_review") {
+        const approvalId = stableUuid(3, approvalCounter++);
+        approvalRows.push({
+          draftIdx: i,
+          approvalId,
+          approval: {
+            id: approvalId,
+            companyId: DEMO_COMPANY_ID,
+            kind: "draft_publish",
+            status: "pending",
+            payload: {
+              draftId,
+              channel: spec.channel,
+              predictedPercentile: spec.predictedPercentile,
+            },
+            createdByAgentId: draftRow.authoredByAgentId ?? null,
+            createdAt: minutesAgo(spec.ageMinutes - 1),
+          },
+        });
+      } else if (spec.status === "denied") {
+        const approvalId = stableUuid(3, approvalCounter++);
+        approvalRows.push({
+          draftIdx: i,
+          approvalId,
+          approval: {
+            id: approvalId,
+            companyId: DEMO_COMPANY_ID,
+            kind: "draft_publish",
+            status: "denied",
+            payload: {
+              draftId,
+              channel: spec.channel,
+            },
+            createdByAgentId: draftRow.authoredByAgentId ?? null,
+            createdAt: minutesAgo(spec.ageMinutes + 30),
+            decidedByUserId: DEMO_USER_ID,
+            decidedAt: minutesAgo(spec.ageMinutes),
+            denyRationale:
+              "Hyperbolic claim without supporting evidence — 'orders of magnitude' needs a benchmark and 'period' is hostile sign-off. Rewrite without the superlatives.",
+            denyScope: "forever",
+          },
+        });
+      }
+    }
+    if (approvalRows.length > 0) {
+      await tx
+        .insert(approvals)
+        .values(approvalRows.map((r) => r.approval))
+        .onConflictDoNothing();
+      // Back-link drafts.approvalId so the inbox query joins cleanly.
+      for (const row of approvalRows) {
+        const draftId = draftIds[row.draftIdx];
+        if (!draftId) continue;
+        await tx
+          .update(drafts)
+          .set({ approvalId: row.approvalId })
+          .where(eq(drafts.id, draftId));
+      }
+    }
+
+    console.log("[seed] inserting post_metrics for the 4 published drafts...");
+    const publishedIndices = DRAFT_SPECS
+      .map((spec, i) => ({ spec, i }))
+      .filter(({ spec }) => spec.status === "published")
+      .map(({ i }) => i);
+
+    const metricRows: NewPostMetric[] = [];
+    let metricCounter = 0;
+    for (const draftIdx of publishedIndices) {
+      const spec = DRAFT_SPECS[draftIdx];
+      const draftId = draftIds[draftIdx];
+      if (!spec || !draftId) continue;
+      // Generate ~10 snapshots over the last 7 days for each. Realistic
+      // monotonic-ish growth so the trend chart slopes upward.
+      for (let snap = 0; snap < 10; snap++) {
+        const seed = draftIdx * 100 + snap;
+        const ageHours = 24 * 7 - snap * 16; // ~16h between snapshots
+        const impressionsBase = 5000 + Math.floor(rand(seed) * 45_000);
+        const impressions = Math.floor(impressionsBase * (0.4 + snap * 0.07));
+        const ctr = 0.01 + rand(seed + 1) * 0.04; // 1-5%
+        const clicks = Math.floor(impressions * ctr);
+        const reactions = Math.floor(clicks * (0.08 + rand(seed + 2) * 0.04));
+        const shares = Math.floor(reactions * (0.01 + rand(seed + 3) * 0.02));
+        const comments = Math.floor(reactions * 0.15);
+        const saves = Math.floor(reactions * 0.05);
+        const conversions = Math.floor(clicks * (0.005 + rand(seed + 4) * 0.015));
+        const engagementRate =
+          impressions > 0 ? (reactions + comments + shares + saves) / impressions : 0;
+        const conversionRate = clicks > 0 ? conversions / clicks : 0;
+
+        metricRows.push({
+          id: stableUuid(4, metricCounter++),
+          companyId: DEMO_COMPANY_ID,
+          draftId,
+          platform: spec.channel,
+          snapshotAt: new Date(Date.now() - ageHours * 60 * 60 * 1000),
+          impressions,
+          reach: Math.floor(impressions * 0.85),
+          clicks,
+          reactions,
+          comments,
+          shares,
+          saves,
+          conversions,
+          ctr,
+          engagementRate,
+          conversionRate,
+          ctrPercentile: 30 + rand(seed + 5) * 60,
+          engagementPercentile: 30 + rand(seed + 6) * 60,
+          conversionPercentile: 30 + rand(seed + 7) * 60,
+          raw: { source: "seed-demo" },
+        });
+      }
+    }
+    if (metricRows.length > 0) {
+      await tx.insert(postMetrics).values(metricRows).onConflictDoNothing();
+    }
+
+    console.log(`[seed] inserting ${LESSON_SPECS.length} company_lessons...`);
+    // The orchestrator agent captures most of them; some are user-captured.
+    const orchestratorAgentId = agentValues[0]?.id ?? null;
+    const lessonValues: NewCompanyLesson[] = LESSON_SPECS.map((spec, i) => ({
+      id: stableUuid(5, i),
+      companyId: DEMO_COMPANY_ID,
+      kind: spec.kind,
+      scope: spec.scope,
+      rationale: spec.rationale,
+      topicTags: spec.topicTags,
+      // Skip embedding — vector(384) needs a real embedder; recall_lessons can
+      // function on text/tag matching for the seed and the embedder backfills
+      // when it's wired up.
+      embedding: null,
+      capturedByUserId: i % 2 === 0 ? DEMO_USER_ID : null,
+      capturedByAgentId: i % 2 === 0 ? null : orchestratorAgentId,
+      capturedAt: daysAgo(spec.daysAgo),
+    }));
+    await tx.insert(companyLessons).values(lessonValues).onConflictDoNothing();
+
+    console.log("[seed] inserting 30 audit_log rows over the last 7 days...");
+    const auditValues: NewAuditLogRow[] = [];
+    for (let i = 0; i < 30; i++) {
+      const kind: AuditKind = pickFrom(AUDIT_KINDS, i);
+      const actorKind: ActorKind = pickFrom(ACTOR_KINDS, i + 100);
+      const hoursAgo = Math.floor(rand(i + 200) * 24 * 7);
+      let actorId: string | null = null;
+      if (actorKind === "user") actorId = DEMO_USER_ID;
+      else if (actorKind === "agent") {
+        const a = agentValues[i % agentValues.length];
+        actorId = a?.id ?? null;
+      } else actorId = "system";
+
+      let detailsJson: Record<string, unknown> = {};
+      if (kind === "approval.approved" || kind === "approval.denied") {
+        const draftRow = draftValues[i % draftValues.length];
+        detailsJson = {
+          draftId: draftRow?.id ?? null,
+          channel: draftRow?.channel ?? "linkedin",
+        };
+      } else if (kind === "lessons.recalled") {
+        detailsJson = { matchedCount: 1 + Math.floor(rand(i) * 4) };
+      } else if (kind === "post_metrics.written") {
+        const draftRow = draftValues[i % draftValues.length];
+        detailsJson = {
+          draftId: draftRow?.id ?? null,
+          platform: draftRow?.channel ?? "linkedin",
+          impressions: 1000 + Math.floor(rand(i) * 50_000),
+        };
+      } else if (kind === "experiments.listed") {
+        detailsJson = { count: 2 + Math.floor(rand(i) * 5) };
+      } else if (kind === "anomalies.listed") {
+        detailsJson = { count: Math.floor(rand(i) * 3) };
+      } else if (kind === "metering.written") {
+        detailsJson = { kind: "publish", quantity: 1 };
+      }
+
+      auditValues.push({
+        id: stableUuid(6, i),
+        companyId: DEMO_COMPANY_ID,
+        kind,
+        actorKind,
+        actorId,
+        detailsJson,
+        occurredAt: new Date(Date.now() - hoursAgo * 60 * 60 * 1000),
       });
     }
-  }
-  if (metricRows.length > 0) {
-    await db.insert(postMetrics).values(metricRows).onConflictDoNothing();
-  }
+    await tx.insert(auditLog).values(auditValues).onConflictDoNothing();
 
-  console.log(`[seed] inserting ${LESSON_SPECS.length} company_lessons...`);
-  // The orchestrator agent captures most of them; some are user-captured.
-  const orchestratorAgentId = agentValues[0]?.id ?? null;
-  const lessonValues: NewCompanyLesson[] = LESSON_SPECS.map((spec, i) => ({
-    id: stableUuid(5, i),
-    companyId: DEMO_COMPANY_ID,
-    kind: spec.kind,
-    scope: spec.scope,
-    rationale: spec.rationale,
-    topicTags: spec.topicTags,
-    // Skip embedding — vector(384) needs a real embedder; recall_lessons can
-    // function on text/tag matching for the seed and the embedder backfills
-    // when it's wired up.
-    embedding: null,
-    capturedByUserId: i % 2 === 0 ? DEMO_USER_ID : null,
-    capturedByAgentId: i % 2 === 0 ? null : orchestratorAgentId,
-    capturedAt: daysAgo(spec.daysAgo),
-  }));
-  await db.insert(companyLessons).values(lessonValues).onConflictDoNothing();
-
-  console.log("[seed] inserting 30 audit_log rows over the last 7 days...");
-  const auditValues: NewAuditLogRow[] = [];
-  for (let i = 0; i < 30; i++) {
-    const kind: AuditKind = pickFrom(AUDIT_KINDS, i);
-    const actorKind: ActorKind = pickFrom(ACTOR_KINDS, i + 100);
-    const hoursAgo = Math.floor(rand(i + 200) * 24 * 7);
-    let actorId: string | null = null;
-    if (actorKind === "user") actorId = DEMO_USER_ID;
-    else if (actorKind === "agent") {
-      const a = agentValues[i % agentValues.length];
-      actorId = a?.id ?? null;
-    } else actorId = "system";
-
-    let detailsJson: Record<string, unknown> = {};
-    if (kind === "approval.approved" || kind === "approval.denied") {
-      const draftRow = draftValues[i % draftValues.length];
-      detailsJson = {
-        draftId: draftRow?.id ?? null,
-        channel: draftRow?.channel ?? "linkedin",
-      };
-    } else if (kind === "lessons.recalled") {
-      detailsJson = { matchedCount: 1 + Math.floor(rand(i) * 4) };
-    } else if (kind === "post_metrics.written") {
-      const draftRow = draftValues[i % draftValues.length];
-      detailsJson = {
-        draftId: draftRow?.id ?? null,
-        platform: draftRow?.channel ?? "linkedin",
-        impressions: 1000 + Math.floor(rand(i) * 50_000),
-      };
-    } else if (kind === "experiments.listed") {
-      detailsJson = { count: 2 + Math.floor(rand(i) * 5) };
-    } else if (kind === "anomalies.listed") {
-      detailsJson = { count: Math.floor(rand(i) * 3) };
-    } else if (kind === "metering.written") {
-      detailsJson = { kind: "publish", quantity: 1 };
+    console.log("[seed] inserting 20 meter_events for the current month...");
+    const meterValues: NewMeterEvent[] = [];
+    for (let i = 0; i < 20; i++) {
+      const kind: MeterKind = pickFrom(METER_KINDS, i + 300);
+      // Spread across the current month — 0..30 days back, but never future.
+      const hoursAgo = Math.floor(rand(i + 400) * 24 * 30);
+      // totalCostUsd in [0.01, 2.50]
+      const totalCostUsd = 0.01 + rand(i + 500) * 2.49;
+      const quantity = kind === "voice_score_query" ? 10 + Math.floor(rand(i) * 90) : 1;
+      const unitCostUsd = quantity > 0 ? totalCostUsd / quantity : totalCostUsd;
+      meterValues.push({
+        id: stableUuid(7, i),
+        companyId: DEMO_COMPANY_ID,
+        kind,
+        quantity,
+        unitCostUsd,
+        totalCostUsd,
+        refKind: kind === "publish" ? "draft" : null,
+        refId: kind === "publish" ? (draftIds[i % draftIds.length] ?? null) : null,
+        occurredAt: new Date(Date.now() - hoursAgo * 60 * 60 * 1000),
+      });
     }
+    await tx.insert(meterEvents).values(meterValues).onConflictDoNothing();
 
-    auditValues.push({
-      id: stableUuid(6, i),
-      companyId: DEMO_COMPANY_ID,
-      kind,
-      actorKind,
-      actorId,
-      detailsJson,
-      occurredAt: new Date(Date.now() - hoursAgo * 60 * 60 * 1000),
-    });
-  }
-  await db.insert(auditLog).values(auditValues).onConflictDoNothing();
-
-  console.log("[seed] inserting 20 meter_events for the current month...");
-  const meterValues: NewMeterEvent[] = [];
-  for (let i = 0; i < 20; i++) {
-    const kind: MeterKind = pickFrom(METER_KINDS, i + 300);
-    // Spread across the current month — 0..30 days back, but never future.
-    const hoursAgo = Math.floor(rand(i + 400) * 24 * 30);
-    // totalCostUsd in [0.01, 2.50]
-    const totalCostUsd = 0.01 + rand(i + 500) * 2.49;
-    const quantity = kind === "voice_score_query" ? 10 + Math.floor(rand(i) * 90) : 1;
-    const unitCostUsd = quantity > 0 ? totalCostUsd / quantity : totalCostUsd;
-    meterValues.push({
-      id: stableUuid(7, i),
-      companyId: DEMO_COMPANY_ID,
-      kind,
-      quantity,
-      unitCostUsd,
-      totalCostUsd,
-      refKind: kind === "publish" ? "draft" : null,
-      refId: kind === "publish" ? (draftIds[i % draftIds.length] ?? null) : null,
-      occurredAt: new Date(Date.now() - hoursAgo * 60 * 60 * 1000),
-    });
-  }
-  await db.insert(meterEvents).values(meterValues).onConflictDoNothing();
-
-  console.log(
-    `[seed] done — ${AGENT_SPECS.length} agents, ${DRAFT_SPECS.length} drafts, ${approvalRows.length} approvals, ${metricRows.length} post_metrics rows, ${LESSON_SPECS.length} lessons, ${auditValues.length} audit rows, ${meterValues.length} meter events`,
-  );
-  console.log("[seed] login at http://localhost:3000/login as demo@clipstack.app");
+    console.log(
+      `[seed] done — ${AGENT_SPECS.length} agents, ${DRAFT_SPECS.length} drafts, ${approvalRows.length} approvals, ${metricRows.length} post_metrics rows, ${LESSON_SPECS.length} lessons, ${auditValues.length} audit rows, ${meterValues.length} meter events`,
+    );
+    console.log("[seed] login at http://localhost:3000/login as demo@clipstack.app");
+  });
 }
 
 main()

@@ -39,7 +39,7 @@ pnpm exec tsx scripts/seed-demo.ts
 |---|---|
 | `DATABASE_URL` | The Postgres connection string the Drizzle client reads in `lib/db/client.ts`. The script `process.exit(1)`s with a clear message if it's unset. |
 
-The seed script connects directly via `getDb()` (not `withTenant`) — it's inserting *as* the seed and would otherwise be filtered by the RLS policies in `0002_enable_rls.sql`.
+The seed script wraps every statement in `withTenant(DEMO_COMPANY_ID, ...)`, which sets `app.current_company_id` for the duration of the seed transaction. This is required because the documented `DATABASE_URL` resolves to the `clipstack_app` Postgres role (NOBYPASSRLS); without the setting, every RLS-filtered DELETE returns 0 rows and the company INSERT trips the policy `WITH CHECK (id = app_current_company_id())`. The DEMO_COMPANY_ID is the value the policy compares against on `companies` (`id = app_current_company_id()`) and on every child table (`app_company_matches(company_id)`), so wiping + reinserting the demo tenant works inside one transaction.
 
 ## Idempotency
 
