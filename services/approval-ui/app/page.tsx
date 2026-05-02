@@ -6,6 +6,10 @@ import { AppShell } from "@/components/layout/AppShell";
 import { HeroKpiTile } from "@/components/mission-control/HeroKpiTile";
 import { ApprovalQueueTile } from "@/components/mission-control/ApprovalQueueTile";
 import { AgentActivityTile } from "@/components/mission-control/AgentActivityTile";
+import {
+  AnomaliesTile,
+  type AnomalyDetection,
+} from "@/components/mission-control/AnomaliesTile";
 import { ExperimentsTile, type BanditSummary } from "@/components/mission-control/ExperimentsTile";
 import { MetricTile } from "@/components/mission-control/MetricTile";
 import { Card, CardHeader, CardLabel } from "@/components/ui/card";
@@ -35,9 +39,22 @@ const agents = [
 
 // Mission Control is a server component → it can directly call the
 // internal helpers (no need for an HTTP roundtrip back to its own
-// /api/companies/:cid/experiments route). This keeps the first paint
-// fast even when the bandit-orchestrator call is slow — Next.js
-// Streaming + suspense let us decompose further if it ever bites.
+// /api/companies/:cid/* routes). This keeps the first paint fast even
+// when the orchestration calls are slow — Next.js Streaming + suspense
+// let us decompose further if it ever bites.
+
+const SERVICE_NAME = "approval-ui";
+const PROXY_TIMEOUT_MS = 5000;
+const REVALIDATE_S = 15;
+
+function authHeaders(token: string, companyId: string): Record<string, string> {
+  return {
+    "X-Clipstack-Service-Token": token,
+    "X-Clipstack-Active-Company": companyId,
+    "X-Clipstack-Service-Name": SERVICE_NAME,
+  };
+}
+
 async function fetchBandits(): Promise<BanditSummary[]> {
   const session = await getSession();
   const companyId = session.activeCompanyId;
@@ -45,7 +62,6 @@ async function fetchBandits(): Promise<BanditSummary[]> {
 
   const baseUrl = process.env.BANDIT_ORCH_BASE_URL;
   const token = process.env.SERVICE_TOKEN;
-  // Stub fallback — same offline-dev contract as the API route.
   if (!baseUrl || !token) return [];
 
   try {
@@ -54,32 +70,64 @@ async function fetchBandits(): Promise<BanditSummary[]> {
         companyId,
       )}`,
       {
+        headers: authHeaders(token, companyId),
+        signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
+        next: { revalidate: REVALIDATE_S },
+      },
+    );
+    if (!resp.ok) return [];
+    const payload = (await resp.json()) as { bandits?: BanditSummary[] };
+    return payload.bandits ?? [];
+  } catch {
+    return [];
+  }
+}
+
+async function fetchAnomalies(): Promise<AnomalyDetection[]> {
+  const session = await getSession();
+  const companyId = session.activeCompanyId;
+  if (!companyId) return [];
+
+  const baseUrl = process.env.PERFORMANCE_INGEST_BASE_URL;
+  const token = process.env.SERVICE_TOKEN;
+  if (!baseUrl || !token) return [];
+
+  try {
+    const resp = await fetch(
+      `${baseUrl.replace(/\/$/, "")}/anomaly/scan`,
+      {
+        method: "POST",
         headers: {
-          "X-Clipstack-Service-Token": token,
-          "X-Clipstack-Active-Company": companyId,
-          "X-Clipstack-Service-Name": "approval-ui",
+          ...authHeaders(token, companyId),
+          "Content-Type": "application/json",
         },
-        signal: AbortSignal.timeout(5000),
-        // Mission Control polls in the background; let Next.js cache
-        // briefly so a refresh-spam doesn't hammer the orchestrator.
-        next: { revalidate: 15 },
+        body: JSON.stringify({
+          company_id: companyId,
+          lookback_hours: 24,
+          z_threshold: 2.5,
+        }),
+        signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
+        next: { revalidate: REVALIDATE_S },
       },
     );
     if (!resp.ok) return [];
     const payload = (await resp.json()) as {
-      bandits?: BanditSummary[];
+      detections?: AnomalyDetection[];
     };
-    return payload.bandits ?? [];
+    return payload.detections ?? [];
   } catch {
-    // Fail-soft on outage — empty list renders the tile's "no
-    // experiments yet" state gracefully. Bus-status surfaces are
-    // the right place to alert on backend health.
     return [];
   }
 }
 
 export default async function MissionControlPage() {
-  const bandits = await fetchBandits();
+  // Fire both fetches in parallel — neither blocks the other; they're
+  // independent backends. Total wall-clock = max(t_bandits, t_anomalies)
+  // rather than t_bandits + t_anomalies.
+  const [bandits, anomalies] = await Promise.all([
+    fetchBandits(),
+    fetchAnomalies(),
+  ]);
 
   return (
     <AppShell title="Mission Control">
@@ -124,6 +172,13 @@ export default async function MissionControlPage() {
               last scan: 4m ago
             </div>
           </Card>
+
+          {/* Performance anomalies — Doc 4 §2.2. Different signal class
+              from crisis monitor: this surface watches the workspace's
+              own drafts (z-score vs running mean), not the wider news
+              cycle. Real data: detections come from performance-ingest's
+              /anomaly/scan against histograms × last_values. */}
+          <AnomaliesTile detections={anomalies} lookbackHours={24} zThreshold={2.5} />
 
           {/* Cost rollup */}
           <MetricTile
