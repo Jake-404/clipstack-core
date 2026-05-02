@@ -1,0 +1,1479 @@
+# Clipstack Core — Mission Control API (OpenAPI 3.1)
+#
+# Hand-written spec covering every approval-ui route under /api/.
+# WorkOS auth-flow routes (/api/auth/*) are intentionally omitted; see
+# core/docs/auth.md.
+#
+# Source of truth: services/approval-ui/app/api/**/route.ts.
+# Narrative counterpart: core/docs/api.md.
+# Drift checker is on the roadmap — regenerate by hand when routes change.
+
+openapi: "3.1.0"
+
+info:
+  title: "Clipstack Core — Mission Control API"
+  version: "0.1.0"
+  description: |
+    Machine-readable spec for the approval-ui HTTP surface. Covers human
+    approvals, lessons recall, post-metrics persistence, draft revisions,
+    claim verification, metering, and the read-through proxies onto the
+    backend FastAPI services. WorkOS auth-flow routes (login/callback/
+    logout) are documented in `core/docs/auth.md` and intentionally omitted
+    here because their redirect + cookie-set semantics don't fit cleanly
+    into OpenAPI response shapes.
+
+    See `core/docs/api.md` for the prose reference and
+    `core/CONTRIBUTING.md` for setup.
+  contact:
+    name: Clipstack Core
+    url: "https://github.com/ClipstackHQ/core"
+  license:
+    name: MIT
+    url: "https://opensource.org/licenses/MIT"
+
+servers:
+  - url: "http://localhost:3000"
+    description: "Local dev via dev-setup.sh + pnpm dev"
+  - url: "https://app.clipstack.example"
+    description: "Hosted SaaS — substitute your deployment URL"
+
+tags:
+  - name: Approvals
+    description: "Human gates on agent output. Session-only (agents may not approve their own work)."
+  - name: Drafts
+    description: "Read + verify drafts and their revision history."
+  - name: Metering
+    description: "USP 10 — per-output spend counter and durable post-metric persistence."
+  - name: Lessons
+    description: "USP 5 editorial memory — cosine-similarity recall against company_lessons."
+  - name: Experiments
+    description: "Bandit-orchestrator read-through proxy. Live multi-armed bandit summaries."
+  - name: Anomalies
+    description: "Performance-ingest read-through proxy. z-score detections on workspace metrics."
+  - name: Audit
+    description: "Generic audit-log ingest from Python services and manual operator entries."
+  - name: Health
+    description: "Liveness + fleet-health probes. Unauthenticated by design."
+
+# Default security: either path authenticates. Per-route overrides where
+# the route is session-only (Approvals) or unauthenticated (Health).
+security:
+  - session: []
+  - serviceToken: []
+
+components:
+  securitySchemes:
+    serviceToken:
+      type: apiKey
+      in: header
+      name: X-Clipstack-Service-Token
+      description: |
+        32+ char service token; the request also requires
+        X-Clipstack-Active-Company header. Optional
+        X-Clipstack-Service-Name lands in audit-log details.
+        Constant-time compared against SERVICE_TOKEN env var.
+    session:
+      type: apiKey
+      in: cookie
+      name: clipstack-session
+      description: |
+        iron-session cookie set by /api/auth/callback after WorkOS
+        Authkit OAuth. httpOnly, secure in prod, sameSite=lax,
+        30-day rolling expiry. Carries
+        { workosUserId, userId, activeCompanyId, authenticatedAt }.
+
+  schemas:
+
+    # ─── Envelopes ──────────────────────────────────────────────────
+
+    OkEnvelope:
+      type: object
+      required: [ok, data]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        data:
+          type: object
+          description: Route-specific payload — see per-route response schemas.
+
+    ErrorEnvelope:
+      type: object
+      required: [ok, error]
+      properties:
+        ok:
+          type: boolean
+          const: false
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - bad_request
+                - unauthorized
+                - forbidden
+                - not_found
+                - conflict
+                - validation_failed
+                - rate_limited
+                - internal
+              description: ApiErrorCode discriminated union.
+            message:
+              type: string
+            details:
+              type: object
+              description: Optional structured detail; e.g. zod issues array.
+              additionalProperties: true
+
+    # ─── Enums (mirror lib/db/schema/enums.ts) ──────────────────────
+
+    Channel:
+      type: string
+      enum: [x, linkedin, reddit, tiktok, instagram, newsletter, blog]
+
+    LessonScope:
+      type: string
+      enum: [forever, this_topic, this_client]
+
+    LessonKind:
+      type: string
+      enum: [human_denied, critic_blocked, policy_rule]
+
+    ApprovalKind:
+      type: string
+      enum:
+        - draft_publish
+        - engagement_reply
+        - campaign_launch
+        - agent_replacement
+        - reactive_trend
+        - skill_install
+        - voice_corpus_add
+        - metered_spend_unlock
+
+    ApprovalStatus:
+      type: string
+      enum: [pending, approved, denied, expired, revoked]
+
+    DraftStatus:
+      type: string
+      enum:
+        - drafting
+        - in_review
+        - awaiting_approval
+        - approved
+        - scheduled
+        - published
+        - denied
+        - archived
+
+    ActorKind:
+      type: string
+      enum: [user, agent, system]
+
+    MeterEventKind:
+      type: string
+      enum:
+        - publish
+        - metered_asset_generation
+        - x402_outbound_call
+        - x402_inbound_call
+        - voice_score_query
+        - compliance_check
+
+    Kpi:
+      type: string
+      enum: [ctr, engagement_rate, conversion_rate]
+
+    ClaimVerifierStatus:
+      type: string
+      enum:
+        - pending
+        - verified
+        - drift
+        - dead_link
+        - unsupported
+        - paywalled
+        - rate_limited
+
+    # ─── Lessons ────────────────────────────────────────────────────
+
+    LessonRecallRequest:
+      type: object
+      required: [topic]
+      properties:
+        topic:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        k:
+          type: integer
+          minimum: 1
+          maximum: 20
+          default: 5
+        scope:
+          $ref: "#/components/schemas/LessonScope"
+        clientId:
+          type: string
+          format: uuid
+          nullable: true
+
+    Lesson:
+      type: object
+      required: [id, kind, scope, rationale, similarity]
+      properties:
+        id:
+          type: string
+          format: uuid
+        kind:
+          $ref: "#/components/schemas/LessonKind"
+        scope:
+          $ref: "#/components/schemas/LessonScope"
+        rationale:
+          type: string
+        topicTags:
+          type: array
+          items:
+            type: string
+          nullable: true
+        clientId:
+          type: string
+          format: uuid
+          nullable: true
+        capturedByUserId:
+          type: string
+          format: uuid
+          nullable: true
+        capturedByAgentId:
+          type: string
+          format: uuid
+          nullable: true
+        capturedAt:
+          type: string
+          format: date-time
+        similarity:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: "1 - cosine_distance against the embedded topic. 1 = identical, 0 = orthogonal."
+
+    LessonRecallResponse:
+      type: object
+      required: [topic_excerpt, k, resultCount, lessons]
+      properties:
+        topic_excerpt:
+          type: string
+          description: First 240 chars of the input topic.
+        scope:
+          oneOf:
+            - $ref: "#/components/schemas/LessonScope"
+            - type: "null"
+        k:
+          type: integer
+        resultCount:
+          type: integer
+        lessons:
+          type: array
+          items:
+            $ref: "#/components/schemas/Lesson"
+
+    # ─── Drafts ─────────────────────────────────────────────────────
+
+    HighPerformersQuery:
+      type: object
+      properties:
+        kpi:
+          $ref: "#/components/schemas/Kpi"
+        percentile:
+          type: integer
+          minimum: 50
+          maximum: 99
+          default: 75
+          description: Workspace-relative percentile floor.
+        k:
+          type: integer
+          minimum: 1
+          maximum: 20
+          default: 3
+        platform:
+          $ref: "#/components/schemas/Channel"
+        topic:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Optional — when set, rerank by cosine similarity to the embedded topic.
+
+    Draft:
+      type: object
+      required: [draftId, channel, kpiValue, kpiPercentile]
+      properties:
+        draftId:
+          type: string
+          format: uuid
+        channel:
+          $ref: "#/components/schemas/Channel"
+        title:
+          type: string
+          nullable: true
+        bodyExcerpt:
+          type: string
+          description: Body trimmed to 240 chars with a trailing ellipsis when truncated.
+        publishedAt:
+          type: string
+          format: date-time
+          nullable: true
+        publishedUrl:
+          type: string
+          format: uri
+          nullable: true
+        kpiValue:
+          type: number
+          nullable: true
+        kpiPercentile:
+          type: number
+          minimum: 0
+          maximum: 100
+          nullable: true
+        snapshotAt:
+          type: string
+          format: date-time
+          nullable: true
+        blendedScore:
+          type: number
+          nullable: true
+          description: "0.6 * (kpi_percentile/100) + 0.4 * (1 - cosine_distance) when ranking by topic; null in kpi_only mode."
+
+    HighPerformersResponse:
+      type: object
+      required: [kpi, percentile, k, rankingMode, results]
+      properties:
+        kpi:
+          $ref: "#/components/schemas/Kpi"
+        percentile:
+          type: integer
+        k:
+          type: integer
+        platform:
+          oneOf:
+            - $ref: "#/components/schemas/Channel"
+            - type: "null"
+        topic:
+          type: string
+          nullable: true
+        rankingMode:
+          type: string
+          enum: [topic_blended, kpi_only]
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/Draft"
+
+    DraftRevision:
+      type: object
+      required: [id, revisionNumber, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        parentRevisionId:
+          type: string
+          format: uuid
+          nullable: true
+        revisionNumber:
+          type: integer
+          minimum: 1
+        bodyExcerpt:
+          type: string
+          description: Body trimmed to 500 chars.
+        voiceScore:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+        voicePasses:
+          type: boolean
+          nullable: true
+        predictedPercentile:
+          type: number
+          nullable: true
+        predictedPercentileLow:
+          type: number
+          nullable: true
+        predictedPercentileHigh:
+          type: number
+          nullable: true
+        criticNotes:
+          type: string
+          nullable: true
+        reviewVerdict:
+          type: string
+          nullable: true
+        authoredByAgentId:
+          type: string
+          format: uuid
+          nullable: true
+        langgraphRunId:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    DraftRevisionsResponse:
+      type: object
+      required: [draftId, revisionCount, revisions]
+      properties:
+        draftId:
+          type: string
+          format: uuid
+        revisionCount:
+          type: integer
+        revisions:
+          type: array
+          items:
+            $ref: "#/components/schemas/DraftRevision"
+
+    DraftClaimsRequest:
+      type: object
+      properties:
+        claimIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          maxItems: 200
+        force:
+          type: boolean
+          default: false
+          description: When false, claims verified within the last 7 days are skipped.
+
+    ClaimResult:
+      type: object
+      required: [claimId, status, ranAt]
+      properties:
+        claimId:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/ClaimVerifierStatus"
+        score:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+        rationale:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+        ranAt:
+          type: string
+          format: date-time
+
+    DraftClaimsResponse:
+      type: object
+      required: [draftId, claimCount, byStatus, results]
+      properties:
+        draftId:
+          type: string
+          format: uuid
+        claimCount:
+          type: integer
+        byStatus:
+          type: object
+          additionalProperties:
+            type: integer
+          description: Tally keyed by ClaimVerifierStatus.
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClaimResult"
+
+    # ─── Metering ───────────────────────────────────────────────────
+
+    MetricSnapshot:
+      type: object
+      required: [draftId, platform]
+      properties:
+        draftId:
+          type: string
+          format: uuid
+        platform:
+          type: string
+          minLength: 1
+          maxLength: 40
+          description: Free-text platform identifier; mirrors performance-ingest's MetricSnapshot.
+        snapshotAt:
+          type: string
+          format: date-time
+          description: ISO-8601; defaults to server now() when omitted. Rejected if > 5 min in the future.
+        impressions:
+          type: integer
+          minimum: 0
+        reach:
+          type: integer
+          minimum: 0
+        clicks:
+          type: integer
+          minimum: 0
+        reactions:
+          type: integer
+          minimum: 0
+        comments:
+          type: integer
+          minimum: 0
+        shares:
+          type: integer
+          minimum: 0
+        saves:
+          type: integer
+          minimum: 0
+        conversions:
+          type: integer
+          minimum: 0
+        raw:
+          type: object
+          additionalProperties: true
+
+    PostMetricsRequest:
+      type: object
+      required: [snapshots]
+      properties:
+        clientId:
+          type: string
+          format: uuid
+          nullable: true
+        snapshots:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            $ref: "#/components/schemas/MetricSnapshot"
+
+    PostMetricsResponse:
+      type: object
+      required: [insertedCount]
+      properties:
+        insertedCount:
+          type: integer
+          minimum: 0
+
+    MeterEventRequest:
+      type: object
+      required: [kind, quantity]
+      properties:
+        kind:
+          $ref: "#/components/schemas/MeterEventKind"
+        quantity:
+          type: number
+          minimum: 0
+        unitCostUsd:
+          type: number
+          minimum: 0
+        totalCostUsd:
+          type: number
+          minimum: 0
+        refKind:
+          type: string
+          minLength: 1
+          maxLength: 40
+        refId:
+          type: string
+          minLength: 1
+          maxLength: 120
+        occurredAt:
+          type: string
+          format: date-time
+          description: ISO-8601; defaults to server now() when omitted. Rejected if > 5 min in the future.
+        clientId:
+          type: string
+          format: uuid
+          nullable: true
+
+    MeterEventResponse:
+      type: object
+      required: [eventId]
+      properties:
+        eventId:
+          type: string
+          format: uuid
+
+    # ─── Experiments ────────────────────────────────────────────────
+
+    BanditSummary:
+      type: object
+      description: Pass-through from bandit-orchestrator (snake_case from FastAPI).
+      properties:
+        bandit_id:
+          type: string
+        company_id:
+          type: string
+          format: uuid
+        campaign_id:
+          type: string
+          format: uuid
+          nullable: true
+        platform:
+          $ref: "#/components/schemas/Channel"
+        message_pillar:
+          type: string
+        algorithm:
+          type: string
+          enum: [thompson, epsilon_greedy, ucb1]
+        arm_count:
+          type: integer
+        active_arm_count:
+          type: integer
+        total_allocations:
+          type: integer
+        total_rewards:
+          type: integer
+        leading_arm:
+          type: string
+          nullable: true
+        leading_posterior_mean:
+          type: number
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    ExperimentsResponse:
+      type: object
+      required: [companyId, bandits]
+      properties:
+        companyId:
+          type: string
+          format: uuid
+        bandits:
+          type: array
+          items:
+            $ref: "#/components/schemas/BanditSummary"
+
+    # ─── Anomalies ──────────────────────────────────────────────────
+
+    AnomalyDetection:
+      type: object
+      description: Pass-through from performance-ingest's AnomalyDetection pydantic model.
+      required: [draft_id, platform, metric, z_score, value, detected_at]
+      properties:
+        draft_id:
+          type: string
+          format: uuid
+        platform:
+          type: string
+        metric:
+          type: string
+        z_score:
+          type: number
+        value:
+          type: number
+        rolling_mean:
+          type: number
+        rolling_std:
+          type: number
+        detected_at:
+          type: string
+          format: date-time
+
+    AnomaliesResponse:
+      type: object
+      required: [companyId, lookbackHours, zThreshold, detections, skipped]
+      properties:
+        companyId:
+          type: string
+          format: uuid
+        lookbackHours:
+          type: integer
+        zThreshold:
+          type: number
+        detections:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnomalyDetection"
+        skipped:
+          type: boolean
+          description: True when PERFORMANCE_INGEST_BASE_URL or SERVICE_TOKEN are unset, or the upstream call fails.
+
+    # ─── Approvals ──────────────────────────────────────────────────
+
+    ApprovalRow:
+      type: object
+      description: The updated approvals row returned by approve/deny.
+      required: [id, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        kind:
+          $ref: "#/components/schemas/ApprovalKind"
+        status:
+          $ref: "#/components/schemas/ApprovalStatus"
+        clientId:
+          type: string
+          format: uuid
+          nullable: true
+        decidedByUserId:
+          type: string
+          format: uuid
+          nullable: true
+        decidedAt:
+          type: string
+          format: date-time
+          nullable: true
+        denyRationale:
+          type: string
+          nullable: true
+        denyScope:
+          oneOf:
+            - $ref: "#/components/schemas/LessonScope"
+            - type: "null"
+
+    ApproveResponse:
+      type: object
+      required: [approval]
+      properties:
+        approval:
+          $ref: "#/components/schemas/ApprovalRow"
+
+    DenyRequest:
+      type: object
+      required: [rationale, scope]
+      properties:
+        rationale:
+          type: string
+          minLength: 20
+          maxLength: 2000
+          description: USP 5 — every deny captures a rationale.
+        scope:
+          $ref: "#/components/schemas/LessonScope"
+
+    DenyResponse:
+      type: object
+      required: [approval, lessonId]
+      properties:
+        approval:
+          $ref: "#/components/schemas/ApprovalRow"
+        lessonId:
+          type: string
+          format: uuid
+          description: Newly inserted company_lessons row carrying the rationale.
+
+    # ─── Audit ──────────────────────────────────────────────────────
+
+    AuditEventRequest:
+      type: object
+      required: [kind, actorKind, actorId]
+      properties:
+        kind:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: Free-text resource.verb identifier (e.g. bandit.arm_pruned).
+        actorKind:
+          $ref: "#/components/schemas/ActorKind"
+        actorId:
+          type: string
+          maxLength: 64
+          nullable: true
+        detailsJson:
+          type: object
+          additionalProperties: true
+        occurredAt:
+          type: string
+          format: date-time
+          description: ISO-8601; defaults to server now() when omitted. Rejected if > 5 min in the future.
+        clientId:
+          type: string
+          format: uuid
+          nullable: true
+
+    AuditEventResponse:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+          format: uuid
+
+    # ─── Health ─────────────────────────────────────────────────────
+
+    HealthLiveness:
+      type: object
+      required: [status, service, version, time]
+      properties:
+        status:
+          type: string
+          const: ok
+        service:
+          type: string
+          const: approval-ui
+        version:
+          type: string
+        time:
+          type: string
+          format: date-time
+
+    HealthService:
+      type: object
+      required: [name, port, baseUrlConfigured, health]
+      properties:
+        name:
+          type: string
+        port:
+          type: integer
+        baseUrlConfigured:
+          type: boolean
+        health:
+          type: object
+          required: [reachable, responseTimeMs, version, error]
+          properties:
+            reachable:
+              type: boolean
+            responseTimeMs:
+              type: integer
+              nullable: true
+            version:
+              type: string
+              nullable: true
+            error:
+              type: string
+              nullable: true
+        producer:
+          type: object
+          nullable: true
+          required: [enabled, emitCount, emitErrors]
+          properties:
+            enabled:
+              type: boolean
+            emitCount:
+              type: integer
+            emitErrors:
+              type: integer
+        consumer:
+          type: object
+          nullable: true
+          required: [enabled, consumedCount, matchedCount, handleErrors]
+          properties:
+            enabled:
+              type: boolean
+            consumedCount:
+              type: integer
+            matchedCount:
+              type: integer
+            handleErrors:
+              type: integer
+
+    HealthAggregate:
+      type: object
+      required: [overall, timestamp, services]
+      properties:
+        overall:
+          type: string
+          enum: [healthy, degraded, down]
+        timestamp:
+          type: string
+          format: date-time
+        services:
+          type: array
+          items:
+            $ref: "#/components/schemas/HealthService"
+
+  # ─── Reusable response components ─────────────────────────────────
+
+  responses:
+    BadRequest:
+      description: Invalid input — malformed JSON, bad UUID, mismatched workspace.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Unauthorized:
+      description: No valid session or service token.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Forbidden:
+      description: Cross-tenant access or invalid service token.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    NotFound:
+      description: Resource not found (RLS-hidden cross-tenant rows surface as 404).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    ValidationFailed:
+      description: Body or query failed zod validation; details carries the issues array.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    InternalError:
+      description: Unhandled error; sanitised — never leaks stack traces.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+
+paths:
+
+  # ─── Approvals ──────────────────────────────────────────────────────
+
+  /api/approvals/{id}/approve:
+    post:
+      tags: [Approvals]
+      summary: Approve approval
+      description: |
+        Flips an approval row from status='pending' to status='approved' and
+        stamps decided_by_user_id + decided_at. Idempotent — a re-fire on a
+        decided row returns 400 with the existing status. RLS hides
+        cross-tenant rows; an attempt to approve someone else's approval
+        returns 404 indistinguishably from a missing id. Session-only —
+        agents cannot approve their own work.
+      security:
+        - session: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Approval updated.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ApproveResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/approvals/{id}/deny:
+    post:
+      tags: [Approvals]
+      summary: Deny approval
+      description: |
+        USP 5 enforcement — every deny captures a rationale (>=20 chars) and
+        a scope. The same transaction updates the approval, inserts a
+        company_lessons row of kind human_denied, and writes the audit_log
+        row. The next time an agent recalls lessons on a touching topic,
+        this rationale lands in its system prompt. Session-only.
+      security:
+        - session: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DenyRequest"
+      responses:
+        "200":
+          description: Approval denied; lesson captured.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/DenyResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ─── Lessons ────────────────────────────────────────────────────────
+
+  /api/companies/{companyId}/lessons/recall:
+    post:
+      tags: [Lessons]
+      summary: Recall lessons
+      description: |
+        Cosine-similarity recall against company_lessons.embedding (vector(384),
+        ivfflat index from 0007). Embeds the topic via LiteLLM's voice-embed
+        profile, runs ORDER BY embedding <=> $vec ASC, optionally filters by
+        scope and client. Returns top-K lessons with similarity scores in [0,1].
+      parameters:
+        - name: companyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LessonRecallRequest"
+      responses:
+        "200":
+          description: Recalled lessons sorted by similarity.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/LessonRecallResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ─── Drafts ─────────────────────────────────────────────────────────
+
+  /api/companies/{companyId}/drafts/high-performers:
+    get:
+      tags: [Drafts]
+      summary: List high-performing drafts
+      description: |
+        Returns the workspace's published drafts whose KPI lands at or above
+        the requested percentile. With topic set, embeds it once via LiteLLM
+        and reranks candidates by 0.6 * (kpi_percentile / 100) + 0.4 * (1 -
+        cosine_distance). Without topic, ranks by absolute KPI value.
+        LiteLLM-unreachable falls back to KPI-only ranking.
+      parameters:
+        - name: companyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: kpi
+          in: query
+          schema:
+            $ref: "#/components/schemas/Kpi"
+        - name: percentile
+          in: query
+          schema:
+            type: integer
+            minimum: 50
+            maximum: 99
+            default: 75
+        - name: k
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 20
+            default: 3
+        - name: platform
+          in: query
+          schema:
+            $ref: "#/components/schemas/Channel"
+        - name: topic
+          in: query
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 500
+      responses:
+        "200":
+          description: Top-K drafts ranked by KPI or topic-blended score.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/HighPerformersResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/companies/{companyId}/drafts/{draftId}/revisions:
+    get:
+      tags: [Drafts]
+      summary: List draft revisions
+      description: |
+        Returns the draft's full revision tree from draft_revisions, ordered
+        by created_at ascending. Bodies are excerpted to 500 chars; full
+        bodies fetched on-demand via a planned /revisions/{id} route. The
+        component nests by parent_revision_id; this route returns a flat list.
+      parameters:
+        - name: companyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: draftId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Flat list of revisions.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/DraftRevisionsResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/companies/{companyId}/drafts/{draftId}/verify-claims:
+    post:
+      tags: [Drafts]
+      summary: Verify draft claims
+      description: |
+        USP 8 provenance — re-runs the claim verifier across either the
+        supplied claim ids or every claim attached to the draft. Without
+        force, claims verified within the last 7 days are skipped. Stub
+        today: marks every claim with supporting_url as verified (score 1.0);
+        claims without a URL stay pending. Real fetch + snippet-match lands
+        in a follow-up slice; the route shape is final.
+      parameters:
+        - name: companyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: draftId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DraftClaimsRequest"
+      responses:
+        "200":
+          description: Per-claim verifier results plus a byStatus tally.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/DraftClaimsResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ─── Metering ───────────────────────────────────────────────────────
+
+  /api/companies/{companyId}/post-metrics:
+    post:
+      tags: [Metering]
+      summary: Persist post-metric snapshots
+      description: |
+        Durable-persistence sibling of performance-ingest's /ingest. The
+        Redpanda emission is real-time signal; this route is the historical
+        record. Backdating defence: snapshotAt more than 5 minutes in the
+        future is rejected for the entire batch.
+      parameters:
+        - name: companyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PostMetricsRequest"
+      responses:
+        "200":
+          description: Inserted-row count.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PostMetricsResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/companies/{companyId}/meter-events:
+    post:
+      tags: [Metering]
+      summary: Record meter event
+      description: |
+        USP 10 metering counter. One row per metered event. Backdating
+        defence applies to occurredAt (5-minute future tolerance). Audit
+        row written inside the same transaction as the meter row so
+        partial-success states cannot leak.
+      parameters:
+        - name: companyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MeterEventRequest"
+      responses:
+        "200":
+          description: New meter event id.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/MeterEventResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ─── Experiments ────────────────────────────────────────────────────
+
+  /api/companies/{companyId}/experiments:
+    get:
+      tags: [Experiments]
+      summary: List experiments
+      description: |
+        Read-through proxy onto bandit-orchestrator's GET /bandits. Returns
+        the orchestrator's BanditSummary[] shape verbatim (snake_case from
+        FastAPI). Fail-soft: missing service token or unreachable orchestrator
+        returns { bandits: [] } so the tile renders cleanly.
+      parameters:
+        - name: companyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: campaignId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: includeArchived
+          in: query
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Bandit summaries for the workspace.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ExperimentsResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ─── Anomalies ──────────────────────────────────────────────────────
+
+  /api/companies/{companyId}/anomalies:
+    get:
+      tags: [Anomalies]
+      summary: List anomaly detections
+      description: |
+        Read-through proxy onto performance-ingest's POST /anomaly/scan.
+        GET on the proxy + POST on the underlying service is intentional:
+        HTTP cache rules prefer GET on read paths. Fail-soft: when
+        PERFORMANCE_INGEST_BASE_URL or SERVICE_TOKEN are unset, returns an
+        empty detection list with skipped: true.
+      parameters:
+        - name: companyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: lookback_hours
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 168
+            default: 24
+        - name: z_threshold
+          in: query
+          schema:
+            type: number
+            minimum: 0.5
+            maximum: 10
+            default: 2.5
+        - name: client_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: z-score detections within the lookback window.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/AnomaliesResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ─── Audit ──────────────────────────────────────────────────────────
+
+  /api/companies/{companyId}/audit-events:
+    post:
+      tags: [Audit]
+      summary: Record audit event
+      description: |
+        Generic audit-log ingest path. The kind column in audit_log is
+        unconstrained text so new producers ship new kinds without an SQL
+        migration. Backdating defence applies to occurredAt (5-minute future
+        tolerance). Deliberately no meta audit_log row about the audit-write
+        itself — would recurse into infinite META-of-META rows.
+      parameters:
+        - name: companyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuditEventRequest"
+      responses:
+        "200":
+          description: New audit row id.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/AuditEventResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ─── Health ─────────────────────────────────────────────────────────
+
+  /api/health:
+    get:
+      tags: [Health]
+      summary: Liveness probe
+      description: |
+        approval-ui liveness + version probe. Used by the docker-compose
+        healthcheck and uptime probes. No auth, no DB access.
+      security: []
+      responses:
+        "200":
+          description: Service is live.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/HealthLiveness"
+
+  /api/health/services:
+    get:
+      tags: [Health]
+      summary: Fleet health aggregate
+      description: |
+        Fans out parallel /health (and where applicable /producer/status or
+        /consumer/status) probes against the eight backend services. Each
+        probe is bounded by a 2s timeout. Services whose *_BASE_URL env var
+        is unset are reported as baseUrlConfigured: false — distinct from a
+        real outage so dev boxes don't paint half the fleet red.
+        Cache-Control: no-store. No auth — status endpoints need to be
+        reachable for monitoring without a session.
+      security: []
+      responses:
+        "200":
+          description: Aggregated fleet health.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/HealthAggregate"
+        "500": { $ref: "#/components/responses/InternalError" }
