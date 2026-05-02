@@ -15,6 +15,7 @@ import { notFound } from "next/navigation";
 import { and, desc, eq } from "drizzle-orm";
 
 import { AppShell } from "@/components/layout/AppShell";
+import { ApprovalActions } from "@/components/draft/ApprovalActions";
 import { Badge } from "@/components/ui/badge";
 
 // Mirrors the badge component's variant union — kept inline rather
@@ -28,6 +29,15 @@ type BadgeTone =
   | "danger"
   | "info"
   | "outline";
+
+// Drafts in these statuses have an active approval row pending —
+// approve/deny buttons render. Other statuses (drafting, approved,
+// denied, scheduled, published, archived) don't show actions; the
+// approval has either not been requested yet or already decided.
+const PENDING_APPROVAL_STATUSES = new Set([
+  "in_review",
+  "awaiting_approval",
+]);
 import { Card, CardHeader, CardLabel } from "@/components/ui/card";
 import { withTenant } from "@/lib/db/client";
 import { drafts } from "@/lib/db/schema/drafts";
@@ -47,6 +57,7 @@ interface DraftDetail {
   publishedAt: Date | null;
   createdAt: Date;
   scheduledAt: Date | null;
+  approvalId: string | null;
 }
 
 interface MetricRow {
@@ -97,6 +108,7 @@ async function fetchDraft(
           publishedAt: drafts.publishedAt,
           createdAt: drafts.createdAt,
           scheduledAt: drafts.scheduledAt,
+          approvalId: drafts.approvalId,
         })
         .from(drafts)
         .where(eq(drafts.id, draftId))
@@ -201,6 +213,32 @@ export default async function DraftDetailPage({ params }: PageProps) {
             )}
           </div>
         </div>
+
+        {/* Approval actions — render only when the draft is awaiting
+            human action AND has an approvalId pointing at the
+            approvals row. The actions disappear after the decision
+            lands (router.refresh re-runs this server component and
+            the status moves out of PENDING_APPROVAL_STATUSES). */}
+        {draft.approvalId && PENDING_APPROVAL_STATUSES.has(draft.status) && (
+          <Card size="medium" tone="accent" className="mb-6">
+            <div className="flex items-baseline justify-between gap-4 mb-3">
+              <div className="flex flex-col gap-0.5">
+                <span className="text-sm font-medium text-text-primary">
+                  pending your decision
+                </span>
+                <span className="text-xs text-text-tertiary">
+                  Approve sends this draft to the publish pipeline. Deny
+                  captures a lesson the team can recall on the next
+                  related piece.
+                </span>
+              </div>
+            </div>
+            <ApprovalActions
+              approvalId={draft.approvalId}
+              draftId={draft.id}
+            />
+          </Card>
+        )}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           {/* Body — takes the wider 2-col cell on lg screens */}
