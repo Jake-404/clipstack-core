@@ -20,21 +20,20 @@ import { Card, CardHeader, CardLabel } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { getSession } from "@/lib/api/session";
 import { withTenant } from "@/lib/db/client";
+import { agents as agentsTable } from "@/lib/db/schema/agents";
+import { drafts } from "@/lib/db/schema/drafts";
 import { companyLessons } from "@/lib/db/schema/lessons";
-import { count, sql } from "drizzle-orm";
+import { asc, count, eq, inArray, sql } from "drizzle-orm";
+import type {
+  AgentMarkColor,
+  AgentMarkShape,
+} from "@/components/AgentMark";
 
 // Mock data only — wired to real services in Phase A.0 step 6.
 // Real source: services/performance-ingest/ + services/agent-crewai/.
 const heroTrend = [42, 45, 51, 49, 56, 60, 58, 63, 67, 65, 71, 73];
 const ctrTrend  = [2.1, 2.4, 2.3, 2.8, 3.1, 3.4, 3.2, 3.5];
 const reachTrend = [12, 18, 22, 19, 25, 28, 31, 34];
-
-const queueItems = [
-  { id: "a1", title: "Q2 outlook for VeChain holders — LinkedIn carousel", agentLabel: "S", agentShape: "hexagon" as const, agentColor: "amber" as const, ageMinutes: 12, predictedPercentile: 78, channel: "linkedin" },
-  { id: "a2", title: "VTHO staking yield explainer thread", agentLabel: "C", agentShape: "circle" as const, agentColor: "violet" as const, ageMinutes: 47, predictedPercentile: 64, channel: "x" },
-  { id: "a3", title: "MiCA Q&A — investor newsletter draft", agentLabel: "L", agentShape: "rounded-square" as const, agentColor: "violet" as const, ageMinutes: 92, predictedPercentile: 71, channel: "newsletter" },
-  { id: "a4", title: "Q3 ecosystem partnership rollout — coordinated launch", agentLabel: "S", agentShape: "hexagon" as const, agentColor: "amber" as const, ageMinutes: 180, predictedPercentile: 49, channel: "x" },
-];
 
 const agents = [
   { id: "mira",  label: "Mira",       role: "orchestrator", shape: "circle"         as const, color: "teal"    as const, status: "working" as const, recentAction: "drafting reply to Anthropic mention", costThisWeek: 4.21 },
@@ -87,6 +86,118 @@ async function fetchBandits(): Promise<BanditSummary[]> {
     return payload.bandits ?? [];
   } catch {
     return [];
+  }
+}
+
+// Agent role → AgentMark visual mapping. Doc 8 §5.6 — every role
+// has a stable (shape, color) so the same agent reads the same way
+// across surfaces. New roles fall back to (circle, slate) which
+// reads as "unspecified" rather than misattributing.
+const AGENT_ROLE_VIZ: Record<
+  string,
+  { shape: AgentMarkShape; color: AgentMarkColor }
+> = {
+  orchestrator:        { shape: "circle",          color: "teal" },
+  researcher:          { shape: "square",          color: "emerald" },
+  strategist:          { shape: "hexagon",         color: "amber" },
+  long_form_writer:    { shape: "rounded-square",  color: "violet" },
+  social_adapter:      { shape: "diamond",         color: "rose" },
+  newsletter_adapter:  { shape: "rounded-square",  color: "violet" },
+  brand_qa:            { shape: "octagon",         color: "sky" },
+  devils_advocate_qa:  { shape: "octagon",         color: "fuchsia" },
+  claim_verifier:      { shape: "pentagon",        color: "slate" },
+  engagement:          { shape: "triangle",        color: "rose" },
+  lifecycle:           { shape: "circle",          color: "amber" },
+  trend_detector:      { shape: "diamond",         color: "fuchsia" },
+  algorithm_probe:     { shape: "pentagon",        color: "sky" },
+  live_event_monitor:  { shape: "triangle",        color: "amber" },
+  compliance:          { shape: "octagon",         color: "slate" },
+};
+
+interface QueueItem {
+  id: string;
+  title: string;
+  agentLabel: string;
+  agentColor: AgentMarkColor;
+  agentShape: AgentMarkShape;
+  ageMinutes: number;
+  predictedPercentile: number;
+  channel: string;
+}
+
+async function fetchApprovalQueue(): Promise<{
+  items: QueueItem[];
+  totalPending: number;
+}> {
+  const session = await getSession();
+  const companyId = session.activeCompanyId;
+  if (!companyId) return { items: [], totalPending: 0 };
+
+  const PENDING_STATUSES = ["awaiting_approval", "in_review"] as const;
+
+  try {
+    const [{ items, total }] = await withTenant(companyId, async (tx) => {
+      // Two reads in one txn for consistency: the per-row list + the
+      // total count. Could be a single query with a window function,
+      // but Drizzle's window helpers aren't expressive enough for the
+      // shape we want; the two-read pattern is clear and the lock
+      // window is still tiny.
+      const rows = await tx
+        .select({
+          id: drafts.id,
+          title: drafts.title,
+          channel: drafts.channel,
+          createdAt: drafts.createdAt,
+          predictedPercentile: drafts.predictedPercentile,
+          agentRole: agentsTable.role,
+          agentDisplayName: agentsTable.displayName,
+        })
+        .from(drafts)
+        .leftJoin(agentsTable, eq(agentsTable.id, drafts.authoredByAgentId))
+        .where(inArray(drafts.status, [...PENDING_STATUSES]))
+        .orderBy(asc(drafts.createdAt))
+        .limit(4);
+
+      const [{ count: totalPending }] = await tx
+        .select({ count: count() })
+        .from(drafts)
+        .where(inArray(drafts.status, [...PENDING_STATUSES]));
+
+      return [{ items: rows, total: totalPending }];
+    });
+
+    const now = Date.now();
+    const queueItems: QueueItem[] = items.map((row) => {
+      const viz = AGENT_ROLE_VIZ[row.agentRole ?? ""] ?? {
+        shape: "circle" as const,
+        color: "slate" as const,
+      };
+      const label = (row.agentDisplayName ?? "?")
+        .trim()
+        .charAt(0)
+        .toUpperCase() || "?";
+      const ageMinutes = Math.max(
+        0,
+        Math.floor((now - row.createdAt.getTime()) / 60_000),
+      );
+      return {
+        id: row.id,
+        title: row.title?.trim() || "(untitled draft)",
+        agentLabel: label,
+        agentShape: viz.shape,
+        agentColor: viz.color,
+        ageMinutes,
+        // Predicted percentile is null until percentile_gate runs;
+        // surface 0 in the UI which the existing tile renders as
+        // "danger" tone — visually flags "not yet predicted".
+        predictedPercentile: Math.round(row.predictedPercentile ?? 0),
+        channel: row.channel,
+      };
+    });
+
+    return { items: queueItems, totalPending: Number(total ?? 0) };
+  } catch {
+    return { items: [], totalPending: 0 };
   }
 }
 
@@ -165,12 +276,13 @@ async function fetchAnomalies(): Promise<AnomalyDetection[]> {
 
 export default async function MissionControlPage() {
   // Fire all fetches in parallel — they're independent (HTTP to two
-  // services + one local DB read). Total wall-clock = max(t_bandits,
-  // t_anomalies, t_lessons) rather than the sum.
-  const [bandits, anomalies, lessonStats] = await Promise.all([
+  // services + two local DB reads). Total wall-clock = max(...) rather
+  // than the sum.
+  const [bandits, anomalies, lessonStats, approvalQueue] = await Promise.all([
     fetchBandits(),
     fetchAnomalies(),
     fetchLessonStats(),
+    fetchApprovalQueue(),
   ]);
 
   return (
@@ -180,7 +292,10 @@ export default async function MissionControlPage() {
         <div className="grid grid-cols-12 gap-4 auto-rows-[minmax(120px,auto)]">
           <HeroKpiTile predicted={73} delta={8} trend={heroTrend} weeklyShipped={42} />
 
-          <ApprovalQueueTile items={queueItems} totalPending={12} />
+          <ApprovalQueueTile
+            items={approvalQueue.items}
+            totalPending={approvalQueue.totalPending}
+          />
 
           <AgentActivityTile agents={agents} />
 
