@@ -42,9 +42,17 @@ import structlog
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
-from histograms import severity_from_zscore, update_and_rank, zscore
+from histograms import (
+    histogram_path,
+    load_sorted,
+    mean_std,
+    severity_from_zscore,
+    update_and_rank,
+    zscore,
+)
 from persist import persist_batch
 from producer import EventProducer
+from velocity import iter_company_last_values
 from velocity import update_and_compute as update_velocity
 
 log = structlog.get_logger()
@@ -498,11 +506,92 @@ async def poller_stop(platform: Platform) -> dict[str, object]:
     raise NotImplementedError("Live poller wiring lands with the runtime extra")
 
 
+def _scan_workspace_for_anomalies(
+    company_id: str,
+    lookback_hours: int,
+    z_threshold: float,
+) -> list[AnomalyDetection]:
+    """Walk every (draft × platform × metric) last-snapshot for the
+    workspace, z-score against the workspace's running histogram, and
+    return detections above threshold within lookback window.
+
+    Reuses the same data structures the per-snapshot detector uses (the
+    /ingest path) so a workspace's two anomaly surfaces (real-time bus
+    emission + on-demand bulk scan) agree on what counts as anomalous.
+
+    Lookback gate: only consider drafts whose last_values snapshot_at is
+    within lookback_hours. This catches "what's anomalous right now"
+    without surfacing stale spikes from drafts that moved past the
+    window.
+    """
+    detections: list[AnomalyDetection] = []
+    cutoff = datetime.now(UTC).timestamp() - lookback_hours * 3600
+
+    for draft_id, last_map in iter_company_last_values(DATA_DIR, company_id):
+        for key, entry in last_map.items():
+            # Key shape: "{platform}-{metric}". Split on first hyphen so
+            # multi-word metric names with hyphens stay intact (none today,
+            # but defensive against future additions like "bounce-rate").
+            if "-" not in key:
+                continue
+            platform, metric_name = key.split("-", 1)
+            value = entry.get("value")
+            snapshot_at_str = entry.get("snapshot_at")
+            if not isinstance(value, (int, float)):
+                continue
+
+            # Lookback gate
+            if isinstance(snapshot_at_str, str):
+                try:
+                    sa_ts = datetime.fromisoformat(
+                        snapshot_at_str.replace("Z", "+00:00")
+                    ).timestamp()
+                except ValueError:
+                    sa_ts = 0.0
+                if sa_ts < cutoff:
+                    continue
+
+            # Score against the workspace histogram for this (platform,
+            # metric). Re-uses the same file the /ingest hot path writes.
+            sorted_values = load_sorted(
+                histogram_path(DATA_DIR, company_id, platform, metric_name)
+            )
+            if len(sorted_values) < ANOMALY_MIN_SAMPLES:
+                continue
+            stats = mean_std(sorted_values)
+            z = zscore(float(value), stats)
+            if z is None or abs(z) < z_threshold:
+                continue
+
+            mean, std = stats  # type: ignore[misc]  # stats not None when zscore not None
+            detections.append(AnomalyDetection(
+                draft_id=draft_id,
+                platform=platform,  # type: ignore[arg-type]  # narrowed by Platform Literal upstream
+                metric=metric_name,
+                z_score=z,
+                value=float(value),
+                rolling_mean=mean,
+                rolling_std=std,
+                detected_at=str(snapshot_at_str or ""),
+            ))
+
+    return detections
+
+
 @app.post("/anomaly/scan", response_model=AnomalyScanResponse)
 async def anomaly_scan(req: AnomalyScanRequest) -> AnomalyScanResponse:
-    """Run rolling z-score anomaly detection over recent metric snapshots
-    for the workspace. Real path emits content.anomaly events for each
-    detection above z_threshold. Phase A.3 stub returns empty.
+    """Run rolling z-score anomaly detection across the workspace.
+
+    Real backend (sprint-close+): scans every per-draft last-snapshot
+    against the workspace's running histograms (same data structures
+    the /ingest hot path writes). Detections above z_threshold within
+    lookback_hours come back as a list. The bus-emission path on /ingest
+    is unchanged — this is the on-demand bulk-scan surface for
+    Mission Control + Strategist context.
+
+    Returns empty when STUB_MODE=1. Histogram cold start (workspaces
+    with N < ANOMALY_MIN_SAMPLES on a metric) silently skips that
+    metric — better silent than wrong, matches /ingest's gate.
     """
     request_id = str(uuid4())
     log.info(
@@ -522,7 +611,28 @@ async def anomaly_scan(req: AnomalyScanRequest) -> AnomalyScanResponse:
             events_emitted=0,
             skipped=True,
         )
-    raise NotImplementedError("Anomaly detector lands with the runtime extra")
+
+    detections = _scan_workspace_for_anomalies(
+        req.company_id, req.lookback_hours, req.z_threshold
+    )
+    log.info(
+        "anomaly.scan.completed",
+        request_id=request_id,
+        company_id=req.company_id,
+        detection_count=len(detections),
+    )
+    return AnomalyScanResponse(
+        request_id=request_id,
+        company_id=req.company_id,
+        lookback_hours=req.lookback_hours,
+        z_threshold=req.z_threshold,
+        detections=detections,
+        # events_emitted stays 0 — the per-snapshot path on /ingest is
+        # the canonical bus-emission point. /anomaly/scan is read-only
+        # so a Mission Control refresh doesn't double-emit alerts.
+        events_emitted=0,
+        skipped=False,
+    )
 
 
 @app.get("/campaigns/{campaign_id}/rollup", response_model=CampaignRollup)

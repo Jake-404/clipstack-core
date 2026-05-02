@@ -56,6 +56,41 @@ def last_values_path(data_dir: Path, company_id: str, draft_id: str) -> Path:
     return data_dir / LAST_VALUES_SUBDIR / f"{cid}-{did}.json"
 
 
+def iter_company_last_values(
+    data_dir: Path,
+    company_id: str,
+) -> list[tuple[str, dict[str, dict[str, object]]]]:
+    """Walk every last_values file for the workspace, yielding
+    (draft_id, last_dict) pairs. Used by /anomaly/scan to find every
+    draft with recent activity to z-score against the workspace
+    histograms.
+
+    Files are named "{company}-{draft}.json" — we filter by `{cid}-`
+    prefix and strip it to recover the draft_id. Glob matches files
+    only (skips the .tmp half-writes from atomic save_last).
+    """
+    cid = _safe(company_id)
+    sub = data_dir / LAST_VALUES_SUBDIR
+    if not sub.exists() or not cid:
+        return []
+    out: list[tuple[str, dict[str, dict[str, object]]]] = []
+    prefix = f"{cid}-"
+    for path in sub.glob(f"{cid}-*.json"):
+        if path.name.endswith(".tmp"):
+            continue
+        # Strip "{cid}-" prefix and ".json" suffix to recover draft_id.
+        # The cid prefix is sanitised; the draft_id portion is too. So
+        # this round-trips correctly when called from the same code path
+        # that wrote the file.
+        draft_id = path.stem[len(prefix):]
+        if not draft_id:
+            continue
+        last = load_last(path)
+        if last:
+            out.append((draft_id, last))
+    return out
+
+
 def load_last(path: Path) -> dict[str, dict[str, object]]:
     """Load the per-(platform, metric) last-value map for a draft.
 
