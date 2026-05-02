@@ -44,6 +44,7 @@ from pydantic import BaseModel, Field
 
 from histograms import severity_from_zscore, update_and_rank, zscore
 from producer import EventProducer
+from velocity import update_and_compute as update_velocity
 
 log = structlog.get_logger()
 
@@ -291,6 +292,13 @@ def _build_events_for_snapshot(
         percentile, stats, prior_n = update_and_rank(
             DATA_DIR, company_id, snapshot.platform, metric_name, value
         )
+        # Velocity: rate-of-change vs prior snapshot for this exact
+        # (draft × platform × metric). None on cold start; persisted
+        # to the per-draft last-values file for the next call.
+        velocity = update_velocity(
+            DATA_DIR, company_id, snapshot.draft_id, snapshot.platform,
+            metric_name, value, snapshot.snapshot_at,
+        )
 
         metric_events.append((company_id, {
             "id": f"evt_{uuid4().hex}",
@@ -306,7 +314,7 @@ def _build_events_for_snapshot(
                 "metric": metric_name,
                 "value": value,
                 "percentile": percentile,
-                "velocity": None,     # needs prior snapshot — follow-up
+                "velocity": velocity,
                 "snapshot_at": snapshot.snapshot_at,
             },
         }))
