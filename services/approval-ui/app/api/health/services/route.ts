@@ -140,6 +140,9 @@ async function probeHealth(baseUrl: string): Promise<ServiceHealthDetail> {
         error: `HTTP ${resp.status}`,
       };
     }
+    // A 200 with non-JSON body (HTML 502 from a misbehaving proxy, gzip-
+    // decoded badness, etc.) lands in this catch via JSON.parse — which
+    // is why this await sits inside the try block, not above the if.
     const payload = (await resp.json()) as Record<string, unknown>;
     return {
       reachable: true,
@@ -148,9 +151,14 @@ async function probeHealth(baseUrl: string): Promise<ServiceHealthDetail> {
       error: null,
     };
   } catch (err) {
+    // Failure paths (timeout, DNS, JSON parse, refused connection) all
+    // surface responseTimeMs=null so consumers can rely on `truthy =
+    // probe completed and parsed`. The wall-clock time of a failed probe
+    // isn't operationally useful and would confuse charts that plot
+    // responseTimeMs as a latency series.
     return {
       reachable: false,
-      responseTimeMs: Date.now() - startedAt,
+      responseTimeMs: null,
       version: null,
       error: describeError(err),
     };
