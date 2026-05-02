@@ -11,7 +11,11 @@ WORKDIR /app
 RUN pip install --no-cache-dir uv==0.5.4
 
 COPY pyproject.toml ./
-RUN uv pip install --system --no-cache .
+# Real backend image installs aiokafka so the auto-reward listener can
+# subscribe to content.metric_update on Redpanda. The base service still
+# functions without it (manual /reward HTTP route stays available); the
+# [runtime] extra simply unlocks the closed-loop attribution path.
+RUN uv pip install --system --no-cache '.[runtime]'
 
 COPY . .
 

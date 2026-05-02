@@ -22,6 +22,12 @@ ml = [
   "numpy>=1.26.0",
   "scipy>=1.13.0",
 ]
+# Auto-reward listener: subscribes to content.metric_update on Redpanda
+# and updates posteriors in-process. Closes the generate→publish→
+# measure→learn loop without a manual /reward roundtrip per metric.
+runtime = [
+  "aiokafka>=0.12.0",
+]
 dev = [
   "ruff>=0.7.0",
   "mypy>=1.13.0",

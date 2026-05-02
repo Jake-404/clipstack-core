@@ -5,6 +5,18 @@ generates N=3..5 variants per piece; orchestrator allocates publish slots
 across arms via Thompson sampling, weighted by predicted percentile (USP 1)
 + live-performance updates from `content.metric_update` events.
 
+Reward attribution:
+  Two paths into _update_posterior():
+    1. Manual: POST /bandits/{id}/reward (works without the bus; useful
+       for testing + replays + cases where percentile is computed
+       elsewhere).
+    2. Auto: consumer.RewardConsumer subscribes to content.metric_update
+       on Redpanda when EVENTBUS_ENABLED=true. Looks up the event's
+       draft_id in the in-memory reverse index → applies the percentile
+       as reward. No HTTP roundtrip, no manual wiring per workspace.
+  The consumer is the production path; manual /reward stays as the
+  always-available fallback.
+
 State machine per (campaign, platform, message_pillar):
   1. Variants registered → arms initialised with priors informed by USP 1
      percentile predictions (predicted=70 → Beta(7, 3); predicted=None →
@@ -49,6 +61,8 @@ import structlog
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from consumer import RewardConsumer, build_draft_index_from_states
+
 log = structlog.get_logger()
 
 
@@ -74,16 +88,119 @@ DATA_DIR = Path(os.getenv("BANDIT_DATA_DIR", "/data/bandits"))
 # repeated allocations of a once-good variant whose context has changed.
 EXPLORATION_BUDGET_FLOOR: float = 0.05
 
+# In-memory reverse index: draft_id → (bandit_id, variant_id). Built on
+# startup by scanning DATA_DIR/*.json; mutated on /bandits POST when new
+# variants register. Concurrent reads from the consumer + writes from
+# /bandits are safe because both run on the same event loop (no thread
+# interleaving inside a single coroutine step).
+_draft_index: dict[str, tuple[str, str]] = {}
+
+
+def _scan_state_files() -> list[dict[str, object]]:
+    """Read every bandit state file under DATA_DIR. Used on startup to
+    rehydrate the reverse index. Tolerates corrupt files — logs the issue
+    and skips the file rather than failing startup."""
+    if not DATA_DIR.exists():
+        return []
+    out: list[dict[str, object]] = []
+    for path in DATA_DIR.glob("*.json"):
+        # Skip the .tmp atomic-write halfways we sometimes leave behind.
+        if path.name.endswith(".tmp"):
+            continue
+        try:
+            out.append(json.loads(path.read_text()))
+        except (OSError, json.JSONDecodeError) as e:
+            log.warning("state.scan_skipped", path=str(path), error=str(e))
+    return out
+
+
+def _on_metric_update(envelope: dict[str, object]) -> None:
+    """Callback invoked by the RewardConsumer per content.metric_update.
+
+    Filter rules:
+      1. envelope must have a payload
+      2. payload.draft_id must be in our reverse index (else: not a
+         bandit-tracked draft, ignore)
+      3. payload.percentile must be set (else: no normalised reward
+         signal — performance-ingest's percentile-fill enrichment hasn't
+         landed yet, and raw metric values aren't workspace-comparable)
+
+    On match: load bandit state, update posterior, persist atomically.
+    """
+    payload = envelope.get("payload")
+    if not isinstance(payload, dict):
+        return
+    draft_id = payload.get("draft_id")
+    percentile = payload.get("percentile")
+    if not isinstance(draft_id, str) or not isinstance(percentile, (int, float)):
+        return
+
+    pair = _draft_index.get(draft_id)
+    if not pair:
+        return  # not a bandit-tracked draft
+    bandit_id, variant_id = pair
+
+    try:
+        state = _load_state(bandit_id)
+    except HTTPException as e:
+        log.warning(
+            "consumer.state_load_failed",
+            bandit_id=bandit_id,
+            draft_id=draft_id,
+            detail=str(e.detail),
+        )
+        return
+
+    arm = next(
+        (a for a in state["arms"] if a.get("variant_id") == variant_id),
+        None,
+    )
+    if not arm:
+        log.warning(
+            "consumer.variant_missing",
+            bandit_id=bandit_id,
+            variant_id=variant_id,
+            draft_id=draft_id,
+        )
+        return
+
+    _update_posterior(arm, float(percentile))
+    state["total_rewards"] = int(state.get("total_rewards", 0)) + 1
+    _save_state(state, _bandit_path(bandit_id))
+    reward_consumer.record_match()
+    log.info(
+        "consumer.posterior_updated",
+        bandit_id=bandit_id,
+        variant_id=variant_id,
+        draft_id=draft_id,
+        reward=float(percentile),
+        new_posterior_mean=_posterior_mean(arm),
+    )
+
+
+# Singleton — assigned at module import so test paths can poke at it
+# without spinning up the FastAPI app. start() is a no-op until lifespan
+# runs.
+reward_consumer = RewardConsumer(on_metric_update=_on_metric_update)
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # Rehydrate the draft → variant reverse index from disk before the
+    # consumer starts so the first message we handle has a fully built
+    # index. Without this, a service restart would temporarily drop
+    # rewards for in-flight drafts until /bandits POSTs added them back
+    # (which never happens for already-registered bandits).
+    _draft_index.clear()
+    _draft_index.update(build_draft_index_from_states(_scan_state_files()))
     log.info(
         "startup",
         service="bandit-orchestrator",
         stub_mode=STUB_MODE,
         data_dir=str(DATA_DIR),
         exploration_budget_floor=EXPLORATION_BUDGET_FLOOR,
+        draft_index_size=len(_draft_index),
         environment=os.getenv("ENVIRONMENT") or os.getenv("NODE_ENV") or "development",
     )
     if STUB_MODE and _is_production():
@@ -96,7 +213,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 "sampling is OFF. Wire mabwiser or unset BANDIT_STUB_MODE."
             ),
         )
+    await reward_consumer.start()
     yield
+    await reward_consumer.stop()
     log.info("shutdown", service="bandit-orchestrator")
 
 
@@ -326,6 +445,19 @@ async def health() -> dict[str, str]:
     return {"status": "ok", "service": "bandit-orchestrator", "version": "0.1.0"}
 
 
+@app.get("/consumer/status")
+async def consumer_status() -> dict[str, Any]:
+    """Operator visibility into the auto-reward listener. Surfaces:
+      - whether the bus consumer is enabled + connected
+      - draft index size (workspaces actively bandit-tracked)
+      - consumed_count vs matched_count (low ratio = many events for
+        non-bandit drafts, which is expected; missing matches = bug)
+    """
+    stats: dict[str, Any] = dict(reward_consumer.stats)
+    stats["draft_index_size"] = len(_draft_index)
+    return stats
+
+
 @app.post("/bandits", response_model=RegisterArmsResponse)
 async def register_arms(req: RegisterArmsRequest) -> RegisterArmsResponse:
     """Register a new bandit instance. Strategist calls this when it has
@@ -368,6 +500,12 @@ async def register_arms(req: RegisterArmsRequest) -> RegisterArmsResponse:
         "pruned_arms": [],
     }
     _save_state(state, _bandit_path(bandit_id))
+
+    # Update the in-memory reverse index so the consumer can attribute
+    # incoming content.metric_update events to this newly-registered
+    # bandit's arms without waiting for a service restart's rescan.
+    for variant in req.variants:
+        _draft_index[variant.draft_id] = (bandit_id, variant.variant_id)
 
     return RegisterArmsResponse(
         request_id=request_id,
