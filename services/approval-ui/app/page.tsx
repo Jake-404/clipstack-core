@@ -10,6 +10,11 @@ import {
   AnomaliesTile,
   type AnomalyDetection,
 } from "@/components/mission-control/AnomaliesTile";
+import {
+  BusHealthTile,
+  type BusHealth,
+  type BusStatus,
+} from "@/components/mission-control/BusHealthTile";
 import { ExperimentsTile, type BanditSummary } from "@/components/mission-control/ExperimentsTile";
 import {
   InstitutionalMemoryTile,
@@ -479,6 +484,116 @@ async function fetchLessonStats(): Promise<LessonStats> {
   }
 }
 
+async function fetchStatusUrl(
+  url: string,
+  token: string,
+  companyId: string,
+): Promise<Record<string, unknown> | null> {
+  // Single helper for the three /producer/status + /consumer/status
+  // probes. Each call is fail-soft + short-timeout so a wedged service
+  // can't slow the whole Mission Control page render. Returns null
+  // when the service is unreachable / non-200; the caller surfaces
+  // that as `reachable: false`.
+  try {
+    const resp = await fetch(url, {
+      headers: authHeaders(token, companyId),
+      signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
+      next: { revalidate: REVALIDATE_S },
+    });
+    if (!resp.ok) return null;
+    return (await resp.json()) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function asNumber(v: unknown): number | undefined {
+  return typeof v === "number" ? v : undefined;
+}
+
+function asBool(v: unknown): boolean | undefined {
+  return typeof v === "boolean" ? v : undefined;
+}
+
+function buildProducerStatus(
+  payload: Record<string, unknown> | null,
+): BusStatus {
+  if (!payload) return { reachable: false };
+  return {
+    reachable: true,
+    enabled: asBool(payload.enabled),
+    emitCount: asNumber(payload.emit_count),
+    emitErrors: asNumber(payload.emit_errors),
+  };
+}
+
+function buildConsumerStatus(
+  payload: Record<string, unknown> | null,
+): BusStatus {
+  if (!payload) return { reachable: false };
+  return {
+    reachable: true,
+    enabled: asBool(payload.enabled),
+    consumedCount: asNumber(payload.consumed_count),
+    matchedCount: asNumber(payload.matched_count),
+    handleErrors: asNumber(payload.handle_errors),
+  };
+}
+
+async function fetchBusHealth(): Promise<BusHealth> {
+  const session = await getSession();
+  const companyId = session.activeCompanyId;
+  const token = process.env.SERVICE_TOKEN;
+
+  // Without a session or service token, every stage reads as
+  // unreachable — the operator sees "the bus probe can't run" rather
+  // than misleading green dots from an empty fetch.
+  if (!companyId || !token) {
+    return {
+      publishPipeline: { reachable: false },
+      performanceIngest: { reachable: false },
+      banditConsumer: { reachable: false },
+    };
+  }
+
+  // All three URLs come from env. When a base URL is unset, we surface
+  // the corresponding stage as unreachable rather than 502-ing the
+  // tile — same fail-soft idiom as the rest of the page.
+  const langgraphUrl = process.env.AGENT_LANGGRAPH_BASE_URL;
+  const ingestUrl = process.env.PERFORMANCE_INGEST_BASE_URL;
+  const banditUrl = process.env.BANDIT_ORCH_BASE_URL;
+
+  const [langgraph, ingest, bandit] = await Promise.all([
+    langgraphUrl
+      ? fetchStatusUrl(
+          `${langgraphUrl.replace(/\/$/, "")}/producer/status`,
+          token,
+          companyId,
+        )
+      : Promise.resolve(null),
+    ingestUrl
+      ? fetchStatusUrl(
+          `${ingestUrl.replace(/\/$/, "")}/producer/status`,
+          token,
+          companyId,
+        )
+      : Promise.resolve(null),
+    banditUrl
+      ? fetchStatusUrl(
+          `${banditUrl.replace(/\/$/, "")}/consumer/status`,
+          token,
+          companyId,
+        )
+      : Promise.resolve(null),
+  ]);
+
+  return {
+    publishPipeline: buildProducerStatus(langgraph),
+    performanceIngest: buildProducerStatus(ingest),
+    banditConsumer: buildConsumerStatus(bandit),
+  };
+}
+
 async function fetchAnomalies(): Promise<AnomalyDetection[]> {
   const session = await getSession();
   const companyId = session.activeCompanyId;
@@ -528,6 +643,7 @@ export default async function MissionControlPage() {
     kpis,
     teamAgents,
     heroKpi,
+    busHealth,
   ] = await Promise.all([
     fetchBandits(),
     fetchAnomalies(),
@@ -536,6 +652,7 @@ export default async function MissionControlPage() {
     fetchKpiMetrics(),
     fetchAgents(),
     fetchHeroKpi(),
+    fetchBusHealth(),
   ]);
 
   return (
@@ -603,6 +720,11 @@ export default async function MissionControlPage() {
               cycle. Real data: detections come from performance-ingest's
               /anomaly/scan against histograms × last_values. */}
           <AnomaliesTile detections={anomalies} lookbackHours={24} zThreshold={2.5} />
+
+          {/* Bus health — operational pulse for the Redpanda producers
+              + bandit consumer. Three green dots = the loop is moving;
+              red/yellow surfaces the wedged stage one read away. */}
+          <BusHealthTile health={busHealth} />
 
           {/* AI spend · this month. Real data: SUM(total_cost_usd)
               over meter_events where occurred_at >= start-of-current-
