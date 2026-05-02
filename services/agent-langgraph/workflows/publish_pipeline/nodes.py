@@ -15,9 +15,13 @@ Each node returns a *partial* state dict — LangGraph merges.
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
+from uuid import uuid4
 
 import httpx
 import structlog
+
+from producer import event_producer
 
 from .state import PublishState
 
@@ -213,24 +217,53 @@ def bandit_allocate(state: PublishState) -> dict:
         return {}
 
     url = f"{BANDIT_ORCHESTRATOR_BASE_URL.rstrip('/')}/bandits/{bandit_id}/allocate"
+    company_id = state.get("company_id")
+    headers: dict[str, str] = {}
+    if SERVICE_TOKEN:
+        # Match the auth-header pattern used by record_metering +
+        # tools/recall_lessons + tools/register_bandit. The bandit-
+        # orchestrator doesn't currently enforce them, but sending them
+        # keeps the call paths consistent so adding auth middleware is
+        # a one-line change on the service side.
+        headers["X-Clipstack-Service-Token"] = SERVICE_TOKEN
+        if company_id:
+            headers["X-Clipstack-Active-Company"] = company_id
+        headers["X-Clipstack-Service-Name"] = SERVICE_NAME
+
     try:
         with httpx.Client(timeout=5.0) as client:
             resp = client.post(
                 url,
-                json={"company_id": state.get("company_id"), "bandit_id": bandit_id},
+                json={"company_id": company_id, "bandit_id": bandit_id},
+                headers=headers,
             )
     except (httpx.HTTPError, OSError) as e:
         log.warning("bandit_allocate.http_error", run_id=run_id, error=str(e))
         return {}
 
     if resp.status_code != 200:
-        log.warning("bandit_allocate.bad_status", run_id=run_id, status=resp.status_code)
+        log.warning(
+            "bandit_allocate.bad_status",
+            run_id=run_id,
+            status=resp.status_code,
+            body=resp.text[:200],
+        )
         return {}
 
     data = resp.json()
+    variant_id = data.get("variant_id")
+    arm_score = data.get("arm_score")
+    log.info(
+        "bandit_allocate.allocated",
+        run_id=run_id,
+        bandit_id=bandit_id,
+        variant_id=variant_id,
+        arm_score=arm_score,
+        rationale=data.get("rationale"),
+    )
     return {
-        "bandit_variant_id": data.get("variant_id"),
-        "bandit_arm_score": data.get("arm_score"),
+        "bandit_variant_id": variant_id,
+        "bandit_arm_score": arm_score,
     }
 
 
@@ -258,20 +291,87 @@ def record_deny_lesson(state: PublishState) -> dict:
 
 # ─── Publish + metering ──────────────────────────────────────────────────────
 
-def publish_to_channel(state: PublishState) -> dict:
-    """Hand the draft to the configured channel adapter.
+async def publish_to_channel(state: PublishState) -> dict:
+    """Hand the draft to the configured channel adapter, then emit a
+    content.published event on Redpanda so downstream consumers (bandit
+    auto-reward, performance-ingest seeding, mission-control feed) can
+    react.
 
-    Phase A.0 stub: pretends success. Real impl calls
-    services/adapters/<channel-family>/<concrete>.publish(draft).
+    Phase A.0 stub: the channel adapter call itself still pretends
+    success (services/adapters/<channel-family>/<concrete>.publish
+    lands when real platform OAuth flows ship). The bus emission is real
+    when EVENTBUS_ENABLED + the [runtime] extra are wired — the
+    bandit_variant_id from `bandit_allocate` flows through to the event
+    so the reward listener can attribute observed performance back to
+    the arm that drove it.
+
+    Async because aiokafka's emit() is async. LangGraph supports both
+    sync + async nodes natively; the rest of the graph stays sync.
     """
+    run_id = state.get("run_id")
+    channel = state.get("channel", "")
+    draft_id = state.get("draft_id", "unknown")
+    company_id = state.get("company_id")
+    bandit_variant_id = state.get("bandit_variant_id")
+
     log.info(
         "publish_to_channel",
-        run_id=state.get("run_id"),
-        channel=state.get("channel"),
+        run_id=run_id,
+        channel=channel,
+        draft_id=draft_id,
+        bandit_variant_id=bandit_variant_id,
     )
+
+    # Stub adapter result. When real platform adapters land, replace
+    # this with services.adapters.<family>.<concrete>.publish(draft) →
+    # returns the real published_url + published_at.
+    published_url = f"https://stub.example.com/{draft_id}"
+    published_at = datetime.now(UTC).isoformat()
+
+    # Emit content.published. Envelope shape mirrors
+    # services/shared/events/envelope.py + ContentPublishedPayload from
+    # schemas.py. emit() is graceful: returns False on bus-disabled or
+    # broker-unreachable; we log either way. Never blocks the run.
+    if event_producer.is_enabled and company_id:
+        envelope = {
+            "id": f"evt_{uuid4().hex}",
+            "topic": "content.published",
+            "version": 1,
+            "occurred_at": published_at,
+            "company_id": company_id,
+            "client_id": state.get("client_id"),
+            "trace_id": state.get("trace_id"),
+            "payload": {
+                "draft_id": draft_id,
+                "channel": channel,
+                "published_url": published_url,
+                "published_at": published_at,
+                "campaign_id": state.get("campaign_id"),
+                "bandit_variant_id": bandit_variant_id,
+            },
+        }
+        ok = await event_producer.emit(
+            "content.published",
+            key=company_id,
+            value=envelope,
+        )
+        if ok:
+            log.info(
+                "publish_to_channel.event_emitted",
+                run_id=run_id,
+                draft_id=draft_id,
+                bandit_variant_id=bandit_variant_id,
+            )
+        else:
+            log.warning(
+                "publish_to_channel.event_emit_failed",
+                run_id=run_id,
+                draft_id=draft_id,
+            )
+
     return {
-        "published_url": f"https://stub.example.com/{state.get('draft_id', 'unknown')}",
-        "published_at": "1970-01-01T00:00:00Z",
+        "published_url": published_url,
+        "published_at": published_at,
     }
 
 

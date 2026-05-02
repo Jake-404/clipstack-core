@@ -22,6 +22,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from observability import LANGFUSE_ENABLED, flush_langfuse, init_langfuse
+from producer import event_producer
 from workflows.publish_pipeline.graph import build_publish_pipeline
 
 log = structlog.get_logger()
@@ -41,7 +42,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         langfuse_enabled=LANGFUSE_ENABLED,
     )
     init_langfuse()
+    await event_producer.start()
     yield
+    await event_producer.stop()
     flush_langfuse()
     log.info("shutdown")
 
@@ -70,6 +73,15 @@ class WorkflowStartResponse(BaseModel):
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "service": "agent-langgraph", "version": "0.1.0"}
+
+
+@app.get("/producer/status")
+async def producer_status() -> dict[str, object]:
+    """Operator visibility into Redpanda producer state. Mirrors the same
+    endpoint on performance-ingest + bandit-orchestrator's /consumer/status —
+    Mission Control's bus-health tile reads all three to render a per-
+    service liveness view."""
+    return event_producer.stats
 
 
 @app.get("/workflows")

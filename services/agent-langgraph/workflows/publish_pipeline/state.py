@@ -16,9 +16,13 @@ class PublishState(TypedDict, total=False):
     # ─── Inputs (immutable through the run) ────────────────────────────────
     run_id: str
     company_id: str
+    client_id: str | None
     draft_id: str
     channel: str
     scheduled_at: str | None
+    # Optional campaign scope — propagated to content.published so
+    # campaign rollups + bandit reward attribution can group by campaign.
+    campaign_id: str | None
 
     # ─── Draft + revision state ───────────────────────────────────────────
     draft_text: str

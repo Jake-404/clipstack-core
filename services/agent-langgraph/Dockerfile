@@ -11,7 +11,10 @@ WORKDIR /app
 RUN pip install --no-cache-dir uv==0.5.4
 
 COPY pyproject.toml ./
-RUN uv pip install --system --no-cache .
+# Real backend image installs aiokafka so publish_pipeline's
+# content.published event can flow to Redpanda. Base service still
+# functions without it (degrades to no-op emission).
+RUN uv pip install --system --no-cache '.[runtime]'
 
 COPY . .
 

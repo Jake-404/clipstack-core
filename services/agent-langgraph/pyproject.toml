@@ -19,6 +19,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Real-bus emission for publish_pipeline's content.published event.
+# Without this extra, the publish node's emit() degrades to no-op (the
+# graph still completes; events just don't flow).
+runtime = [
+  "aiokafka>=0.12.0",
+]
 dev = [
   "ruff>=0.7.0",
   "mypy>=1.13.0",
