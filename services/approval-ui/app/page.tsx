@@ -25,24 +25,17 @@ import { drafts } from "@/lib/db/schema/drafts";
 import { companyLessons } from "@/lib/db/schema/lessons";
 import { meterEvents } from "@/lib/db/schema/metering";
 import { postMetrics } from "@/lib/db/schema/post-metrics";
-import { and, asc, count, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, asc, count, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import type {
   AgentMarkColor,
   AgentMarkShape,
+  AgentStatus,
 } from "@/components/AgentMark";
 
 // Mock data only — wired to real services slice-by-slice. The
 // remaining consts are still mock until their fetch helpers ship:
 // heroTrend (HeroKpiTile), agents (AgentActivityTile).
 const heroTrend = [42, 45, 51, 49, 56, 60, 58, 63, 67, 65, 71, 73];
-
-const agents = [
-  { id: "mira",  label: "Mira",       role: "orchestrator", shape: "circle"         as const, color: "teal"    as const, status: "working" as const, recentAction: "drafting reply to Anthropic mention", costThisWeek: 4.21 },
-  { id: "strat", label: "Strategist", role: "campaign brief shaping", shape: "hexagon" as const, color: "amber" as const, status: "idle"    as const, recentAction: "scored 12 posts overnight", costThisWeek: 1.84 },
-  { id: "writer",label: "Long-form",  role: "long-form writer", shape: "rounded-square" as const, color: "violet" as const, status: "working" as const, recentAction: "MiCA explainer revision 2", costThisWeek: 6.30 },
-  { id: "social",label: "Social",     role: "platform shaper",  shape: "diamond"      as const, color: "rose"    as const, status: "blocked" as const, recentAction: "waiting for image gen quota", costThisWeek: 2.05 },
-  { id: "qa",    label: "Brand QA",   role: "voice + safety",   shape: "octagon"      as const, color: "sky"     as const, status: "idle"    as const, recentAction: "blocked 1 draft this morning", costThisWeek: 0.67 },
-];
 
 // Mission Control is a server component → it can directly call the
 // internal helpers (no need for an HTTP roundtrip back to its own
@@ -202,6 +195,81 @@ async function fetchApprovalQueue(): Promise<{
   }
 }
 
+// agent_status DB enum → AgentMark status. The DB has 'fired' (retired
+// agents) which the tile shouldn't show; we filter those out at the
+// query layer via WHERE retired_at IS NULL. The remaining statuses
+// map directly to AgentMark's vocabulary.
+function mapAgentStatus(dbStatus: string): AgentStatus {
+  switch (dbStatus) {
+    case "working": return "working";
+    case "blocked": return "blocked";
+    case "asleep": return "asleep";
+    case "idle": return "idle";
+    default: return "idle";
+  }
+}
+
+interface AgentActivity {
+  id: string;
+  label: string;
+  role: string;
+  shape: AgentMarkShape;
+  color: AgentMarkColor;
+  status: AgentStatus;
+  recentAction?: string;
+  costThisWeek?: number;
+}
+
+async function fetchAgents(): Promise<AgentActivity[]> {
+  const session = await getSession();
+  const companyId = session.activeCompanyId;
+  if (!companyId) return [];
+
+  try {
+    const rows = await withTenant(companyId, async (tx) =>
+      tx
+        .select({
+          id: agentsTable.id,
+          role: agentsTable.role,
+          displayName: agentsTable.displayName,
+          jobDescription: agentsTable.jobDescription,
+          status: agentsTable.status,
+        })
+        .from(agentsTable)
+        // Filter out 'fired' (retiredAt set) — only show active team.
+        // The tile is for "who's working now", not historical roster.
+        .where(isNull(agentsTable.retiredAt))
+        .orderBy(asc(agentsTable.spawnedAt))
+        .limit(6),
+    );
+
+    return rows.map((row) => {
+      const viz = AGENT_ROLE_VIZ[row.role] ?? {
+        shape: "circle" as const,
+        color: "slate" as const,
+      };
+      return {
+        id: row.id,
+        label: row.displayName,
+        // Render the job description as the role copy — it's the human-
+        // readable "what this agent does" string the workspace owner
+        // wrote when seeding the team. Falls back to the enum role.
+        role: row.jobDescription || row.role,
+        shape: viz.shape,
+        color: viz.color,
+        status: mapAgentStatus(row.status),
+        // recentAction + costThisWeek left undefined — neither is
+        // schema-backed yet. recentAction needs an "agent activity"
+        // log table; costThisWeek needs an agent_id column on
+        // meter_events. Both are own-slice work. The tile renders
+        // cleanly without them.
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
 interface KpiMetrics {
   // 7-day workspace-wide CTR (clicks / impressions). null when there's
   // no impressions in the window (cold workspace).
@@ -353,13 +421,14 @@ export default async function MissionControlPage() {
   // Fire all fetches in parallel — they're independent (HTTP to two
   // services + two local DB reads). Total wall-clock = max(...) rather
   // than the sum.
-  const [bandits, anomalies, lessonStats, approvalQueue, kpis] =
+  const [bandits, anomalies, lessonStats, approvalQueue, kpis, teamAgents] =
     await Promise.all([
       fetchBandits(),
       fetchAnomalies(),
       fetchLessonStats(),
       fetchApprovalQueue(),
       fetchKpiMetrics(),
+      fetchAgents(),
     ]);
 
   return (
@@ -374,7 +443,7 @@ export default async function MissionControlPage() {
             totalPending={approvalQueue.totalPending}
           />
 
-          <AgentActivityTile agents={agents} />
+          <AgentActivityTile agents={teamAgents} />
 
           {/* CTR · last 7d. Real data: SUM(clicks) / SUM(impressions)
               over post_metrics where snapshot_at >= now()-7d. Null
