@@ -32,10 +32,6 @@ import type {
   AgentStatus,
 } from "@/components/AgentMark";
 
-// Mock data only — wired to real services slice-by-slice. The
-// remaining consts are still mock until their fetch helpers ship:
-// heroTrend (HeroKpiTile), agents (AgentActivityTile).
-const heroTrend = [42, 45, 51, 49, 56, 60, 58, 63, 67, 65, 71, 73];
 
 // Mission Control is a server component → it can directly call the
 // internal helpers (no need for an HTTP roundtrip back to its own
@@ -270,6 +266,109 @@ async function fetchAgents(): Promise<AgentActivity[]> {
   }
 }
 
+interface HeroKpi {
+  // Workspace's predicted percentile this week — 0..100. Defaults to 50
+  // when there's no data (cold workspace), matching the percentile_gate
+  // node's "no prediction yet" stub.
+  predicted: number;
+  // Predicted_thisWeek - predicted_lastWeek. Sign tells direction; tile
+  // formats as "±N vs last week".
+  delta: number;
+  // Up to 12 weekly avg-percentile values, oldest first. Shorter when
+  // the workspace is < 12 weeks old.
+  trend: number[];
+  // Drafts published in the last 7 days.
+  weeklyShipped: number;
+}
+
+async function fetchHeroKpi(): Promise<HeroKpi> {
+  const session = await getSession();
+  const companyId = session.activeCompanyId;
+  if (!companyId) {
+    return { predicted: 50, delta: 0, trend: [], weeklyShipped: 0 };
+  }
+
+  try {
+    const now = Date.now();
+    const sevenDaysAgo = new Date(now - 7 * 24 * 60 * 60 * 1000);
+    const fourteenDaysAgo = new Date(now - 14 * 24 * 60 * 60 * 1000);
+    const eightyFourDaysAgo = new Date(now - 84 * 24 * 60 * 60 * 1000);
+
+    const [{ thisWeek, lastWeek, weekly, shipped }] = await withTenant(
+      companyId,
+      async (tx) => {
+        // This-week + last-week averages drive the hero number + delta.
+        // We split into two SELECTs (rather than one CASE WHEN) because
+        // Drizzle composes the simpler version more cleanly + each
+        // query is index-friendly via idx_post_metrics_company_platform.
+        const [thisWeekRow] = await tx
+          .select({
+            avg: sql<number | null>`AVG(${postMetrics.engagementPercentile})`,
+          })
+          .from(postMetrics)
+          .where(gte(postMetrics.snapshotAt, sevenDaysAgo));
+
+        const [lastWeekRow] = await tx
+          .select({
+            avg: sql<number | null>`AVG(${postMetrics.engagementPercentile})`,
+          })
+          .from(postMetrics)
+          .where(
+            and(
+              gte(postMetrics.snapshotAt, fourteenDaysAgo),
+              sql`${postMetrics.snapshotAt} < ${sevenDaysAgo}`,
+            ),
+          );
+
+        // 12-week trend: bucket by date_trunc('week', snapshot_at) and
+        // avg engagement_percentile within each bucket. Returns up to 12
+        // rows oldest-first; we pad if the workspace is younger.
+        const weeklyRows = await tx
+          .select({
+            week: sql<string>`DATE_TRUNC('week', ${postMetrics.snapshotAt})::date`,
+            avg: sql<number | null>`AVG(${postMetrics.engagementPercentile})`,
+          })
+          .from(postMetrics)
+          .where(gte(postMetrics.snapshotAt, eightyFourDaysAgo))
+          .groupBy(sql`DATE_TRUNC('week', ${postMetrics.snapshotAt})`)
+          .orderBy(asc(sql`DATE_TRUNC('week', ${postMetrics.snapshotAt})`));
+
+        // Weekly shipped count — drafts marked published in the
+        // last 7 days. Excludes scheduled-but-not-yet-out drafts.
+        const [shippedRow] = await tx
+          .select({ count: count() })
+          .from(drafts)
+          .where(
+            and(
+              eq(drafts.status, "published"),
+              gte(drafts.publishedAt, sevenDaysAgo),
+            ),
+          );
+
+        return [
+          {
+            thisWeek: Number(thisWeekRow?.avg ?? 50),
+            lastWeek: Number(lastWeekRow?.avg ?? 50),
+            weekly: weeklyRows
+              .map((r) => Number(r.avg ?? 0))
+              .filter((v) => Number.isFinite(v)),
+            shipped: Number(shippedRow?.count ?? 0),
+          },
+        ];
+      },
+    );
+
+    return {
+      predicted: Math.round(thisWeek),
+      delta: Math.round(thisWeek - lastWeek),
+      trend: weekly,
+      weeklyShipped: shipped,
+    };
+  } catch {
+    return { predicted: 50, delta: 0, trend: [], weeklyShipped: 0 };
+  }
+}
+
 interface KpiMetrics {
   // 7-day workspace-wide CTR (clicks / impressions). null when there's
   // no impressions in the window (cold workspace).
@@ -421,22 +520,40 @@ export default async function MissionControlPage() {
   // Fire all fetches in parallel — they're independent (HTTP to two
   // services + two local DB reads). Total wall-clock = max(...) rather
   // than the sum.
-  const [bandits, anomalies, lessonStats, approvalQueue, kpis, teamAgents] =
-    await Promise.all([
-      fetchBandits(),
-      fetchAnomalies(),
-      fetchLessonStats(),
-      fetchApprovalQueue(),
-      fetchKpiMetrics(),
-      fetchAgents(),
-    ]);
+  const [
+    bandits,
+    anomalies,
+    lessonStats,
+    approvalQueue,
+    kpis,
+    teamAgents,
+    heroKpi,
+  ] = await Promise.all([
+    fetchBandits(),
+    fetchAnomalies(),
+    fetchLessonStats(),
+    fetchApprovalQueue(),
+    fetchKpiMetrics(),
+    fetchAgents(),
+    fetchHeroKpi(),
+  ]);
 
   return (
     <AppShell title="Mission Control">
       <div className="p-6">
         {/* Doc 8 §9.2 — bento grid. 12 cols on desktop, stacks on mobile. */}
         <div className="grid grid-cols-12 gap-4 auto-rows-[minmax(120px,auto)]">
-          <HeroKpiTile predicted={73} delta={8} trend={heroTrend} weeklyShipped={42} />
+          {/* Hero KPI: this-week avg engagement percentile + week-over-
+              week delta + 12-week trend + drafts shipped this week.
+              Real data: post_metrics.engagement_percentile aggregated
+              by week, drafts.status='published' counted. Cold workspace
+              defaults to 50/0 to keep the tile legible (vs. NaN). */}
+          <HeroKpiTile
+            predicted={heroKpi.predicted}
+            delta={heroKpi.delta}
+            trend={heroKpi.trend}
+            weeklyShipped={heroKpi.weeklyShipped}
+          />
 
           <ApprovalQueueTile
             items={approvalQueue.items}
