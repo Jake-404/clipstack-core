@@ -23,17 +23,18 @@ import { withTenant } from "@/lib/db/client";
 import { agents as agentsTable } from "@/lib/db/schema/agents";
 import { drafts } from "@/lib/db/schema/drafts";
 import { companyLessons } from "@/lib/db/schema/lessons";
-import { asc, count, eq, inArray, sql } from "drizzle-orm";
+import { meterEvents } from "@/lib/db/schema/metering";
+import { postMetrics } from "@/lib/db/schema/post-metrics";
+import { and, asc, count, eq, gte, inArray, sql } from "drizzle-orm";
 import type {
   AgentMarkColor,
   AgentMarkShape,
 } from "@/components/AgentMark";
 
-// Mock data only — wired to real services in Phase A.0 step 6.
-// Real source: services/performance-ingest/ + services/agent-crewai/.
+// Mock data only — wired to real services slice-by-slice. The
+// remaining consts are still mock until their fetch helpers ship:
+// heroTrend (HeroKpiTile), agents (AgentActivityTile).
 const heroTrend = [42, 45, 51, 49, 56, 60, 58, 63, 67, 65, 71, 73];
-const ctrTrend  = [2.1, 2.4, 2.3, 2.8, 3.1, 3.4, 3.2, 3.5];
-const reachTrend = [12, 18, 22, 19, 25, 28, 31, 34];
 
 const agents = [
   { id: "mira",  label: "Mira",       role: "orchestrator", shape: "circle"         as const, color: "teal"    as const, status: "working" as const, recentAction: "drafting reply to Anthropic mention", costThisWeek: 4.21 },
@@ -201,6 +202,80 @@ async function fetchApprovalQueue(): Promise<{
   }
 }
 
+interface KpiMetrics {
+  // 7-day workspace-wide CTR (clicks / impressions). null when there's
+  // no impressions in the window (cold workspace).
+  ctr7d: number | null;
+  // 7-day workspace-wide reach. 0 if no snapshots in the window.
+  reach7d: number;
+  // Month-to-date AI spend in USD (sum of meter_events.totalCostUsd
+  // for the current calendar month). 0 if nothing metered yet.
+  spendMtd: number;
+}
+
+async function fetchKpiMetrics(): Promise<KpiMetrics> {
+  const session = await getSession();
+  const companyId = session.activeCompanyId;
+  if (!companyId) {
+    return { ctr7d: null, reach7d: 0, spendMtd: 0 };
+  }
+
+  try {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    // First of the current month, UTC. Mirrors the "ai spend · this
+    // month" reading on the tile — month is calendar month, not 30d.
+    const now = new Date();
+    const monthStart = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
+    );
+
+    const [{ ctr7d, reach7d, spendMtd }] = await withTenant(
+      companyId,
+      async (tx) => {
+        // Run the two SUMs over post_metrics + the SUM over
+        // meter_events as separate selects. Drizzle doesn't naturally
+        // express a 3-table aggregation in one statement; the txn
+        // boundary keeps them consistent.
+        const [pmRow] = await tx
+          .select({
+            sumImpressions: sql<number>`COALESCE(SUM(${postMetrics.impressions}), 0)::float8`,
+            sumClicks: sql<number>`COALESCE(SUM(${postMetrics.clicks}), 0)::float8`,
+            sumReach: sql<number>`COALESCE(SUM(${postMetrics.reach}), 0)::float8`,
+          })
+          .from(postMetrics)
+          .where(gte(postMetrics.snapshotAt, sevenDaysAgo));
+
+        const [meterRow] = await tx
+          .select({
+            sumCost: sql<number>`COALESCE(SUM(${meterEvents.totalCostUsd}), 0)::float8`,
+          })
+          .from(meterEvents)
+          .where(gte(meterEvents.occurredAt, monthStart));
+
+        const imp = Number(pmRow?.sumImpressions ?? 0);
+        const clk = Number(pmRow?.sumClicks ?? 0);
+        return [
+          {
+            ctr7d: imp > 0 ? clk / imp : null,
+            reach7d: Number(pmRow?.sumReach ?? 0),
+            spendMtd: Number(meterRow?.sumCost ?? 0),
+          },
+        ];
+      },
+    );
+
+    return { ctr7d, reach7d, spendMtd };
+  } catch {
+    return { ctr7d: null, reach7d: 0, spendMtd: 0 };
+  }
+}
+
+function formatReach(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return n.toFixed(0);
+}
+
 async function fetchLessonStats(): Promise<LessonStats> {
   const session = await getSession();
   const companyId = session.activeCompanyId;
@@ -278,12 +353,14 @@ export default async function MissionControlPage() {
   // Fire all fetches in parallel — they're independent (HTTP to two
   // services + two local DB reads). Total wall-clock = max(...) rather
   // than the sum.
-  const [bandits, anomalies, lessonStats, approvalQueue] = await Promise.all([
-    fetchBandits(),
-    fetchAnomalies(),
-    fetchLessonStats(),
-    fetchApprovalQueue(),
-  ]);
+  const [bandits, anomalies, lessonStats, approvalQueue, kpis] =
+    await Promise.all([
+      fetchBandits(),
+      fetchAnomalies(),
+      fetchLessonStats(),
+      fetchApprovalQueue(),
+      fetchKpiMetrics(),
+    ]);
 
   return (
     <AppShell title="Mission Control">
@@ -299,21 +376,23 @@ export default async function MissionControlPage() {
 
           <AgentActivityTile agents={agents} />
 
+          {/* CTR · last 7d. Real data: SUM(clicks) / SUM(impressions)
+              over post_metrics where snapshot_at >= now()-7d. Null
+              when no impressions in the window — renders as "—" so
+              the user can tell apart "0%" from "no data yet". */}
           <MetricTile
             label="ctr · last 7d"
-            value="3.4"
-            unit="%"
-            delta={{ value: 0.6, label: "vs last week" }}
-            trend={ctrTrend}
+            value={kpis.ctr7d === null ? "—" : (kpis.ctr7d * 100).toFixed(2)}
+            unit={kpis.ctr7d === null ? undefined : "%"}
             size="medium"
             tone="default"
           />
 
+          {/* Reach · last 7d. Real data: SUM(reach) over post_metrics
+              in the same window. */}
           <MetricTile
             label="reach · last 7d"
-            value="34.1k"
-            delta={{ value: 6.2, label: "vs last week" }}
-            trend={reachTrend}
+            value={formatReach(kpis.reach7d)}
             size="medium"
           />
 
@@ -339,11 +418,14 @@ export default async function MissionControlPage() {
               /anomaly/scan against histograms × last_values. */}
           <AnomaliesTile detections={anomalies} lookbackHours={24} zThreshold={2.5} />
 
-          {/* Cost rollup */}
+          {/* AI spend · this month. Real data: SUM(total_cost_usd)
+              over meter_events where occurred_at >= start-of-current-
+              calendar-month UTC. Tracks ALL meter_event_kind rows
+              (publish + metered_asset_generation + x402_inbound +
+              x402_outbound + voice_score_query + compliance_check). */}
           <MetricTile
             label="ai spend · this month"
-            value="$148.40"
-            delta={{ value: -22, label: "vs forecast" }}
+            value={`$${kpis.spendMtd.toFixed(2)}`}
             size="medium"
             tone="default"
           />
