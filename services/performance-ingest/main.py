@@ -42,7 +42,7 @@ import structlog
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
-from histograms import update_and_rank
+from histograms import severity_from_zscore, update_and_rank, zscore
 from producer import EventProducer
 
 log = structlog.get_logger()
@@ -67,6 +67,18 @@ STUB_MODE: bool = os.getenv("INGEST_STUB_MODE", _stub_mode_default()) == "1"
 REDPANDA_BROKERS = os.getenv("REDPANDA_BROKERS", "redpanda:9092")
 EVENTBUS_ENABLED = os.getenv("EVENTBUS_ENABLED", "false").lower() == "true"
 DATA_DIR = Path(os.getenv("INGEST_DATA_DIR", "/data/ingest"))
+
+# z-score threshold for per-snapshot anomaly detection. Values beyond
+# ±Z_THRESHOLD σ from the workspace's running mean trigger a
+# content.anomaly event. 2.5σ matches the existing /anomaly/scan default
+# (~1% false-positive rate on normal data) and is workspace-tunable via
+# the env var.
+Z_THRESHOLD: float = float(os.getenv("INGEST_Z_THRESHOLD", "2.5"))
+
+# Min sample count before z-score detection kicks in. Below this we
+# don't have a reliable mean/std; emitting an anomaly off 5 samples
+# would be noise. 30 is the standard "central limit theorem" floor.
+ANOMALY_MIN_SAMPLES: int = int(os.getenv("INGEST_ANOMALY_MIN_SAMPLES", "30"))
 
 # Module-level singleton — assigned in lifespan so the test/import path
 # doesn't need a broker. Routes call `event_producer.emit(...)`.
@@ -230,24 +242,28 @@ async def producer_status() -> dict[str, object]:
     return event_producer.stats
 
 
-def _snapshot_to_metric_events(
+def _build_events_for_snapshot(
     company_id: str,
     client_id: str | None,
     snapshot: MetricSnapshot,
-) -> list[tuple[str, dict[str, object]]]:
-    """One snapshot → multiple content.metric_update events (one per non-null
-    metric column). Each event carries the envelope plus payload shape from
-    services/shared/events/schemas.py::ContentMetricUpdatePayload.
+) -> tuple[list[tuple[str, dict[str, object]]], list[tuple[str, dict[str, object]]]]:
+    """One snapshot → (metric_events, anomaly_events).
 
-    Percentile fill: each event's `payload.percentile` is computed from
-    the workspace's running histogram for (company × platform × metric)
-    before the new value is inserted. Cold start (empty histogram) →
-    percentile=null, which the bandit consumer correctly no-ops on.
-    The histogram persists across requests under DATA_DIR.
+    Both lists carry (key, envelope) tuples ready for emit_many. The
+    envelope shapes match services/shared/events/schemas.py:
+      - metric_events: ContentMetricUpdatePayload (per non-null metric)
+      - anomaly_events: ContentAnomalyPayload (per metric whose z-score
+        exceeds Z_THRESHOLD, requires N ≥ ANOMALY_MIN_SAMPLES)
 
-    Partitioning key = company_id so a workspace's metric stream lands on
-    the same partition (preserves per-draft ordering for the consumer's
-    velocity calculation).
+    Critical invariant: percentile + z-score are both computed against
+    the *prior* histogram state, before the new value is appended. This
+    is the load-bearing property in histograms.update_and_rank — without
+    it, every cold-start snapshot would score 100% / would have z=0
+    against a degenerate distribution of size 1.
+
+    Partition key = company_id so a workspace's metric stream lands on
+    the same partition (preserves per-draft ordering for velocity calc).
+    Anomaly events partition the same way for consistent fan-out.
     """
     metrics_present: list[tuple[str, float]] = [
         (name, float(value))
@@ -264,16 +280,19 @@ def _snapshot_to_metric_events(
         if value is not None
     ]
 
-    out: list[tuple[str, dict[str, object]]] = []
+    metric_events: list[tuple[str, dict[str, object]]] = []
+    anomaly_events: list[tuple[str, dict[str, object]]] = []
     occurred_at = datetime.now(UTC).isoformat()
+
     for metric_name, value in metrics_present:
-        # Compute percentile against the workspace's running distribution
-        # for this (platform, metric) before inserting the new value.
-        # Returns None on cold start; consumer handles None correctly.
-        percentile = update_and_rank(
+        # update_and_rank atomically: computes percentile + (mean, std)
+        # + prior_n against prior state, then appends + persists. Single
+        # disk roundtrip per metric.
+        percentile, stats, prior_n = update_and_rank(
             DATA_DIR, company_id, snapshot.platform, metric_name, value
         )
-        envelope = {
+
+        metric_events.append((company_id, {
             "id": f"evt_{uuid4().hex}",
             "topic": "content.metric_update",
             "version": 1,
@@ -290,9 +309,46 @@ def _snapshot_to_metric_events(
                 "velocity": None,     # needs prior snapshot — follow-up
                 "snapshot_at": snapshot.snapshot_at,
             },
-        }
-        out.append((company_id, envelope))
-    return out
+        }))
+
+        # Anomaly check — only meaningful when prior_n ≥ ANOMALY_MIN_SAMPLES
+        # (default 30, the standard CLT floor for stable mean/std). Below
+        # that, percentile-fill still happens but no anomaly emits, which
+        # avoids phantom spikes during workspace bootstrap.
+        if prior_n < ANOMALY_MIN_SAMPLES or stats is None:
+            continue
+        z = zscore(value, stats)
+        if z is None or abs(z) < Z_THRESHOLD:
+            continue
+        mean, std = stats
+        # std > 0 guaranteed by zscore returning non-None.
+        anomaly_kind = "metric_zscore_spike" if z > 0 else "metric_zscore_drop"
+        anomaly_events.append((company_id, {
+            "id": f"evt_{uuid4().hex}",
+            "topic": "content.anomaly",
+            "version": 1,
+            "occurred_at": occurred_at,
+            "company_id": company_id,
+            "client_id": client_id,
+            "trace_id": None,
+            "payload": {
+                "draft_id": snapshot.draft_id,
+                "platform": snapshot.platform,
+                "anomaly_kind": anomaly_kind,
+                "severity": severity_from_zscore(z),
+                "metric": metric_name,
+                "detail": {
+                    "z_score": z,
+                    "value": value,
+                    "rolling_mean": mean,
+                    "rolling_std": std,
+                    "z_threshold": Z_THRESHOLD,
+                },
+                "detected_at": snapshot.snapshot_at,
+            },
+        }))
+
+    return metric_events, anomaly_events
 
 
 @app.post("/ingest", response_model=IngestResponse)
@@ -325,19 +381,28 @@ async def ingest(req: IngestRequest) -> IngestResponse:
             skipped=True,
         )
 
-    # Build the full event batch first, then emit. Keeps the request path
-    # easy to reason about + lets us count regardless of bus availability.
-    items: list[tuple[str, dict[str, object]]] = []
+    # Build the full event batches first, then emit. Keeps the request
+    # path easy to reason about + lets us count regardless of bus
+    # availability. Two streams (metric_update + anomaly) are emitted
+    # to separate topics so consumers can subscribe to one or both.
+    metric_items: list[tuple[str, dict[str, object]]] = []
+    anomaly_items: list[tuple[str, dict[str, object]]] = []
     for snap in req.snapshots:
-        items.extend(_snapshot_to_metric_events(req.company_id, req.client_id, snap))
+        m, a = _build_events_for_snapshot(req.company_id, req.client_id, snap)
+        metric_items.extend(m)
+        anomaly_items.extend(a)
 
     emitted = 0
-    if event_producer.is_enabled and items:
-        # producer.emit_many takes (key, value) tuples but its key is
-        # str | None; we always have a company_id. Cast for type clarity.
+    anomalies_emitted = 0
+    if event_producer.is_enabled and metric_items:
         emitted = await event_producer.emit_many(
             "content.metric_update",
-            [(key, value) for key, value in items],
+            [(key, value) for key, value in metric_items],
+        )
+    if event_producer.is_enabled and anomaly_items:
+        anomalies_emitted = await event_producer.emit_many(
+            "content.anomaly",
+            [(key, value) for key, value in anomaly_items],
         )
 
     log.info(
@@ -345,10 +410,16 @@ async def ingest(req: IngestRequest) -> IngestResponse:
         request_id=request_id,
         company_id=req.company_id,
         snapshot_count=len(req.snapshots),
-        events_built=len(items),
+        events_built=len(metric_items),
         events_emitted=emitted,
+        anomalies_built=len(anomaly_items),
+        anomalies_emitted=anomalies_emitted,
     )
 
+    # `events_emitted` stays the metric_update count (its existing
+    # contract). Anomaly counts surface in the structured log + on
+    # /producer/status; if a callsite needs a programmatic anomaly
+    # count we add a field in a follow-up rather than break the schema.
     return IngestResponse(
         request_id=request_id,
         accepted_count=len(req.snapshots),

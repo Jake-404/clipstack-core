@@ -33,7 +33,6 @@ from __future__ import annotations
 import bisect
 import json
 import os
-from collections.abc import Iterable
 from pathlib import Path
 
 import structlog
@@ -123,44 +122,75 @@ def append_with_cap(sorted_values: list[float], value: float, cap: int) -> list[
     return sorted_values
 
 
+def mean_std(sorted_values: list[float]) -> tuple[float, float] | None:
+    """Sample mean + sample standard deviation over the values list.
+
+    Returns None when N < 2 (we can't compute std from a single value;
+    population std is 0 by definition for N=1 which would div-by-zero
+    on z-score). Sample std uses Bessel's correction (N-1 denominator)
+    which matches the convention the anomaly detector follows.
+
+    O(N) walk over the list — fine inside a 10k cap. If profiling shows
+    this as a hot path, swap to running Welford's algorithm where each
+    update_and_rank only does O(1) work.
+    """
+    n = len(sorted_values)
+    if n < 2:
+        return None
+    mean = sum(sorted_values) / n
+    var = sum((v - mean) ** 2 for v in sorted_values) / (n - 1)
+    return mean, var ** 0.5
+
+
 def update_and_rank(
     data_dir: Path,
     company_id: str,
     platform: str,
     metric: str,
     value: float,
-) -> float | None:
-    """Append `value` to the histogram for (company, platform, metric)
-    and return its percentile rank against the *prior* distribution.
+) -> tuple[float | None, tuple[float, float] | None, int]:
+    """Append `value` to the histogram and return:
+      - percentile rank against the *prior* distribution (None on cold
+        start)
+      - (mean, std) of the prior distribution (None when N < 2)
+      - prior_n: the count of values that were in the histogram before
+        this insertion. Lets callers gate on min-samples for anomaly
+        detection without re-reading the file.
 
-    Order matters: we compute the percentile *before* inserting the new
-    value. Otherwise a bootstrap workspace's first snapshot would always
-    score 100 (it's the only value in the histogram, ergo above all
-    others). Returning None on cold start is the right default; the
-    bandit consumer correctly no-ops on it.
+    Percentile + stats are computed before insertion so the new value
+    doesn't poison its own ranking — load-bearing invariant for both
+    percentile-fill (without it, every first snapshot would be 100%)
+    and z-score detection (without it, std would shrink artificially
+    as the value gets included in its own deviation calc).
     """
     path = histogram_path(data_dir, company_id, platform, metric)
     sorted_values = load_sorted(path)
+    prior_n = len(sorted_values)
     rank = percentile_of(value, sorted_values)
+    stats = mean_std(sorted_values)
     sorted_values = append_with_cap(sorted_values, value, HIST_CAPACITY)
     save_sorted(path, sorted_values)
-    return rank
+    return rank, stats, prior_n
 
 
-def update_and_rank_many(
-    data_dir: Path,
-    items: Iterable[tuple[str, str, str, float]],
-) -> dict[tuple[str, str, str, float], float | None]:
-    """Bulk variant of update_and_rank — useful when /ingest fans a single
-    snapshot to N metric_update events (one per non-null column). Returns
-    a dict keyed by the input tuple for stable lookup at the call site.
+def zscore(value: float, stats: tuple[float, float] | None) -> float | None:
+    """Compute z-score of `value` given (mean, std). Returns None when
+    stats is None (cold start) or std is 0 (degenerate distribution
+    where every prior value was identical — z=∞ would not be useful)."""
+    if stats is None:
+        return None
+    mean, std = stats
+    if std == 0.0:
+        return None
+    return (value - mean) / std
 
-    Implementation just calls update_and_rank in a loop — file-level locking
-    isn't a concern at our scale and the order-preserving sequential pass
-    keeps the percentile-then-insert invariant clean.
+
+def severity_from_zscore(z: float, soft_cap: float = 5.0) -> float:
+    """Map |z-score| → severity in [0, 1] for ContentAnomalyPayload.
+
+    Linear ramp up to soft_cap σ (default 5σ saturates to severity=1).
+    Beyond 5σ, the math is sensitive to small std variations + the human
+    interpretation collapses ("very anomalous" doesn't usefully sub-
+    divide), so capping at 1.0 is the right call.
     """
-    out: dict[tuple[str, str, str, float], float | None] = {}
-    for company_id, platform, metric, value in items:
-        rank = update_and_rank(data_dir, company_id, platform, metric, value)
-        out[(company_id, platform, metric, value)] = rank
-    return out
+    return min(1.0, abs(z) / soft_cap)
