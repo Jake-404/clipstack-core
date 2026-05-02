@@ -796,6 +796,7 @@ async def allocate(bandit_id: str, req: AllocateRequest) -> AllocateResponse:
     # every allocate so an arm that recovers can flip back to active.
     obs_window = float(state.get("observation_window_hours", 72))
     age_h = _bandit_age_hours(state)
+    newly_pruned: list[str] = []
     if age_h >= obs_window:
         newly_pruned = _apply_pruning(state, PRUNE_THRESHOLD)
         if newly_pruned:
@@ -806,9 +807,6 @@ async def allocate(bandit_id: str, req: AllocateRequest) -> AllocateResponse:
                 threshold=PRUNE_THRESHOLD,
                 newly_pruned=newly_pruned,
             )
-            # Surface each prune transition on Mission Control's
-            # /activity page. Fail-soft — never blocks /allocate.
-            await _emit_prune_audit(state, newly_pruned)
 
     rng = random.Random()  # noqa: S311 — Thompson sampling uses non-cryptographic RNG by design
     chosen, score, rationale = _thompson_pick(
@@ -819,6 +817,14 @@ async def allocate(bandit_id: str, req: AllocateRequest) -> AllocateResponse:
     chosen["allocation_count"] = int(chosen["allocation_count"]) + 1
     state["total_allocations"] = int(state.get("total_allocations", 0)) + 1
     _save_state(state, _bandit_path(bandit_id))
+
+    # Audit-emit AFTER state is durably persisted. If the emit fails
+    # we still have the structured log line + the persisted prune flag;
+    # if we emitted before save and the save failed, the next /allocate
+    # would re-prune the same arms and write duplicate audit rows.
+    # Fail-soft — never blocks /allocate.
+    if newly_pruned:
+        await _emit_prune_audit(state, newly_pruned)
 
     return AllocateResponse(
         request_id=request_id,
