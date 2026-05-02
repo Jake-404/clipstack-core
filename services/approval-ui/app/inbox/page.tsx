@@ -175,7 +175,12 @@ export default async function InboxPage() {
             </div>
           </Card>
         ) : (
-          <div className="space-y-6">
+          // data-keyboard-list marks this scope as J/K-navigable. The
+          // global <KeyboardShortcuts /> listener picks up every
+          // [data-keyboard-row] descendant in document order and focus-
+          // cycles through them — which spans channel groups cleanly,
+          // since the rows themselves carry the marker.
+          <div className="space-y-6" data-keyboard-list>
             {channels.map((channel) => {
               const group = byChannel[channel];
               return (
@@ -209,6 +214,7 @@ export default async function InboxPage() {
                         <li key={row.id}>
                           <Link
                             href={`/drafts/${row.id}`}
+                            data-keyboard-row
                             className="flex items-center gap-3 py-3 hover:bg-bg-elevated transition-colors duration-fast -mx-2 px-2 rounded"
                           >
                             <AgentMark

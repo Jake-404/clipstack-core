@@ -16,6 +16,7 @@ import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import { useToast } from "@/components/ui/toast";
 
 type Mode =
   | { kind: "idle" }
@@ -41,6 +42,7 @@ interface ApprovalActionsProps {
 
 export function ApprovalActions({ approvalId, draftId: _draftId }: ApprovalActionsProps) {
   const router = useRouter();
+  const toast = useToast();
   const [mode, setMode] = useState<Mode>({ kind: "idle" });
   const [isPending, startTransition] = useTransition();
 
@@ -54,25 +56,41 @@ export function ApprovalActions({ approvalId, draftId: _draftId }: ApprovalActio
         });
         if (!resp.ok) {
           const text = await resp.text();
-          // Show the error inline rather than a toast — keeps the
-          // affordance close to the action so the user doesn't need
-          // to hunt for what went wrong.
+          const shortMsg = `${resp.status} ${text.slice(0, 200)}`;
+          // Inline error stays — toast also fires so the user sees the
+          // failure whether the form is open in front of them or not.
           setMode({
             kind: "denying",
             rationale: "",
             scope: "this_topic",
-            error: `Approve failed: ${resp.status} ${text.slice(0, 200)}`,
+            error: `Approve failed: ${shortMsg}`,
+          });
+          toast.push({
+            kind: "danger",
+            title: "Action failed.",
+            description: `Approve failed: ${shortMsg}`,
           });
           return;
         }
         setMode({ kind: "approved" });
+        toast.push({
+          kind: "success",
+          title: "Approved.",
+          description: "Draft sent to publish pipeline.",
+        });
         router.refresh();
       } catch (e) {
+        const shortMsg = (e as Error).message;
         setMode({
           kind: "denying",
           rationale: "",
           scope: "this_topic",
-          error: `Approve failed: ${(e as Error).message}`,
+          error: `Approve failed: ${shortMsg}`,
+        });
+        toast.push({
+          kind: "danger",
+          title: "Action failed.",
+          description: `Approve failed: ${shortMsg}`,
         });
       }
     });
@@ -99,18 +117,36 @@ export function ApprovalActions({ approvalId, draftId: _draftId }: ApprovalActio
         });
         if (!resp.ok) {
           const text = await resp.text();
+          const shortMsg = `${resp.status} ${text.slice(0, 200)}`;
           setMode({
             ...mode,
-            error: `Deny failed: ${resp.status} ${text.slice(0, 200)}`,
+            error: `Deny failed: ${shortMsg}`,
+          });
+          toast.push({
+            kind: "danger",
+            title: "Action failed.",
+            description: `Deny failed: ${shortMsg}`,
           });
           return;
         }
         setMode({ kind: "denied" });
+        toast.push({
+          kind: "info",
+          title: "Lesson captured.",
+          description:
+            "Future drafts will see this rationale via recall_lessons.",
+        });
         router.refresh();
       } catch (err) {
+        const shortMsg = (err as Error).message;
         setMode({
           ...mode,
-          error: `Deny failed: ${(err as Error).message}`,
+          error: `Deny failed: ${shortMsg}`,
+        });
+        toast.push({
+          kind: "danger",
+          title: "Action failed.",
+          description: `Deny failed: ${shortMsg}`,
         });
       }
     });
