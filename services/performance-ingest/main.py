@@ -34,6 +34,7 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
@@ -41,6 +42,7 @@ import structlog
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
+from histograms import update_and_rank
 from producer import EventProducer
 
 log = structlog.get_logger()
@@ -64,6 +66,7 @@ STUB_MODE: bool = os.getenv("INGEST_STUB_MODE", _stub_mode_default()) == "1"
 
 REDPANDA_BROKERS = os.getenv("REDPANDA_BROKERS", "redpanda:9092")
 EVENTBUS_ENABLED = os.getenv("EVENTBUS_ENABLED", "false").lower() == "true"
+DATA_DIR = Path(os.getenv("INGEST_DATA_DIR", "/data/ingest"))
 
 # Module-level singleton — assigned in lifespan so the test/import path
 # doesn't need a broker. Routes call `event_producer.emit(...)`.
@@ -72,12 +75,14 @@ event_producer = EventProducer()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     log.info(
         "startup",
         service="performance-ingest",
         stub_mode=STUB_MODE,
         eventbus_enabled=EVENTBUS_ENABLED,
         redpanda_brokers=REDPANDA_BROKERS,
+        data_dir=str(DATA_DIR),
         environment=os.getenv("ENVIRONMENT") or os.getenv("NODE_ENV") or "development",
     )
     if STUB_MODE and _is_production():
@@ -234,6 +239,12 @@ def _snapshot_to_metric_events(
     metric column). Each event carries the envelope plus payload shape from
     services/shared/events/schemas.py::ContentMetricUpdatePayload.
 
+    Percentile fill: each event's `payload.percentile` is computed from
+    the workspace's running histogram for (company × platform × metric)
+    before the new value is inserted. Cold start (empty histogram) →
+    percentile=null, which the bandit consumer correctly no-ops on.
+    The histogram persists across requests under DATA_DIR.
+
     Partitioning key = company_id so a workspace's metric stream lands on
     the same partition (preserves per-draft ordering for the consumer's
     velocity calculation).
@@ -256,6 +267,12 @@ def _snapshot_to_metric_events(
     out: list[tuple[str, dict[str, object]]] = []
     occurred_at = datetime.now(UTC).isoformat()
     for metric_name, value in metrics_present:
+        # Compute percentile against the workspace's running distribution
+        # for this (platform, metric) before inserting the new value.
+        # Returns None on cold start; consumer handles None correctly.
+        percentile = update_and_rank(
+            DATA_DIR, company_id, snapshot.platform, metric_name, value
+        )
         envelope = {
             "id": f"evt_{uuid4().hex}",
             "topic": "content.metric_update",
@@ -269,8 +286,8 @@ def _snapshot_to_metric_events(
                 "platform": snapshot.platform,
                 "metric": metric_name,
                 "value": value,
-                "percentile": None,   # filled in by downstream enrichment
-                "velocity": None,     # ditto — needs prior snapshot
+                "percentile": percentile,
+                "velocity": None,     # needs prior snapshot — follow-up
                 "snapshot_at": snapshot.snapshot_at,
             },
         }
