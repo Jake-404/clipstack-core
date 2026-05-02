@@ -57,6 +57,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
+import httpx
 import structlog
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -470,6 +471,16 @@ def _leading_arm(arms: list[dict[str, Any]]) -> str | None:
 PRUNE_THRESHOLD: float = float(os.getenv("BANDIT_PRUNE_THRESHOLD", "0.15"))
 
 
+# Audit-emit destination for prune events. Reads from the same env vars
+# as agent-crewai's register_bandit so a single SERVICE_TOKEN rotation
+# updates every Python service. When unset (offline dev), the emit
+# silently skips — the structured log line is still the source-of-truth
+# record; the audit row is just the Mission Control surface.
+APPROVAL_UI_BASE_URL = os.getenv("APPROVAL_UI_BASE_URL")
+SERVICE_TOKEN = os.getenv("SERVICE_TOKEN")
+SERVICE_NAME = "bandit-orchestrator"
+
+
 def _bandit_age_hours(state: dict[str, Any]) -> float:
     """Hours since the bandit was registered. Returns infinity for
     bandits with malformed/missing created_at so the observation-window
@@ -526,6 +537,90 @@ def _apply_pruning(state: dict[str, Any], threshold: float) -> list[str]:
         state["pruned_arms"] = existing
 
     return newly_pruned
+
+
+async def _emit_prune_audit(
+    state: dict[str, Any],
+    newly_pruned: list[str],
+) -> None:
+    """Write one audit_log row per newly-pruned variant via approval-ui's
+    /audit-events route. Fail-soft: any HTTP / network / config issue is
+    logged at warn-level and swallowed — the existing `bandit.pruned`
+    structured log line is the source-of-truth record, the audit row is
+    just the Mission Control `/activity` page surface.
+
+    Sequential per-variant emission is fine at the typical N=1-3; gather()
+    would shave milliseconds at the cost of harder error handling.
+    """
+    if not (APPROVAL_UI_BASE_URL and SERVICE_TOKEN):
+        log.debug(
+            "audit_emit.skipped",
+            reason="APPROVAL_UI_BASE_URL or SERVICE_TOKEN not set",
+        )
+        return
+
+    company_id = state.get("company_id")
+    if not isinstance(company_id, str) or not company_id:
+        log.warning("audit_emit.missing_company_id", bandit_id=state.get("bandit_id"))
+        return
+
+    arms: list[dict[str, Any]] = state.get("arms") or []
+    leader_id = _leading_arm(arms)
+    leader_arm = next((a for a in arms if a.get("variant_id") == leader_id), None)
+    leader_mean = _posterior_mean(leader_arm) if leader_arm else None
+
+    url = f"{APPROVAL_UI_BASE_URL.rstrip('/')}/api/companies/{company_id}/audit-events"
+    headers = {
+        "X-Clipstack-Service-Token": SERVICE_TOKEN,
+        "X-Clipstack-Active-Company": company_id,
+        "X-Clipstack-Service-Name": SERVICE_NAME,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for variant_id in newly_pruned:
+                arm = next(
+                    (a for a in arms if a.get("variant_id") == variant_id),
+                    None,
+                )
+                pruned_mean = _posterior_mean(arm) if arm else None
+                gap = (
+                    leader_mean - pruned_mean
+                    if leader_mean is not None and pruned_mean is not None
+                    else None
+                )
+                body: dict[str, Any] = {
+                    "kind": "bandit.arm_pruned",
+                    "actorKind": "system",
+                    "actorId": None,
+                    "detailsJson": {
+                        "banditId": state.get("bandit_id"),
+                        "variantId": variant_id,
+                        "draftId": arm.get("draft_id") if arm else None,
+                        "leadingArm": leader_id,
+                        "leaderPosteriorMean": leader_mean,
+                        "prunedArmPosteriorMean": pruned_mean,
+                        "thresholdGap": gap,
+                    },
+                    "clientId": state.get("client_id"),
+                }
+                resp = await client.post(url, json=body, headers=headers)
+                if resp.status_code not in (200, 201):
+                    log.warning(
+                        "audit_emit.bad_status",
+                        status=resp.status_code,
+                        body=resp.text[:300],
+                        variant_id=variant_id,
+                    )
+    except (httpx.HTTPError, OSError) as e:
+        # Never block /allocate on audit visibility. The structured log
+        # line above (`bandit.pruned`) is still the durable record.
+        log.warning(
+            "audit_emit.http_error",
+            error=str(e),
+            bandit_id=state.get("bandit_id"),
+            newly_pruned=newly_pruned,
+        )
 
 
 # ─── Endpoints ─────────────────────────────────────────────────────────────
@@ -711,6 +806,9 @@ async def allocate(bandit_id: str, req: AllocateRequest) -> AllocateResponse:
                 threshold=PRUNE_THRESHOLD,
                 newly_pruned=newly_pruned,
             )
+            # Surface each prune transition on Mission Control's
+            # /activity page. Fail-soft — never blocks /allocate.
+            await _emit_prune_audit(state, newly_pruned)
 
     rng = random.Random()  # noqa: S311 — Thompson sampling uses non-cryptographic RNG by design
     chosen, score, rationale = _thompson_pick(
