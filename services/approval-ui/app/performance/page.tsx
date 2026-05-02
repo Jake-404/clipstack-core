@@ -311,17 +311,29 @@ function ctrSeries(buckets: BucketRow[], expected: number): number[] {
 }
 
 interface DeltaCellProps {
-  value: number;
-  prev: number | undefined;
+  // null = the cell has no value to display ("—"); the arrow is suppressed
+  // regardless of prev. Using null + number lets the engagement column
+  // (which can be missing per row) flow through the same component as the
+  // always-present count columns without phantom arrow logic.
+  value: number | null;
+  prev: number | null | undefined;
   format: (n: number) => string;
 }
 
 // Row-over-row trend arrow for the weekly table. ▲ green if up, ▼ red if
-// down, · neutral if unchanged or no prior row. Lucide arrows so the
-// visual matches the rest of the surface (no Unicode triangle drift).
+// down, · neutral if unchanged. Arrow is suppressed entirely when either
+// side of the comparison is missing — comparing 50 against a phantom 0
+// (was-null) would lie about the trend.
 function DeltaCell({ value, prev, format }: DeltaCellProps) {
+  // Missing current value → "—" + no comparison.
+  if (value === null) {
+    return (
+      <span className="font-mono tabular-nums text-text-tertiary">—</span>
+    );
+  }
   const display = format(value);
-  if (prev === undefined) {
+  // No prior or missing prior → render the value alone, no arrow.
+  if (prev === undefined || prev === null) {
     return (
       <span className="font-mono tabular-nums text-text-primary">
         {display}
@@ -641,23 +653,9 @@ export default async function PerformancePage({
                         </td>
                         <td className="py-2 pl-3 text-right">
                           <DeltaCell
-                            value={
-                              w.engagementPercentile === null
-                                ? 0
-                                : w.engagementPercentile
-                            }
-                            prev={
-                              prior === undefined
-                                ? undefined
-                                : prior.engagementPercentile === null
-                                  ? 0
-                                  : prior.engagementPercentile
-                            }
-                            format={(n) =>
-                              w.engagementPercentile === null
-                                ? "—"
-                                : Math.round(n).toString()
-                            }
+                            value={w.engagementPercentile}
+                            prev={prior?.engagementPercentile ?? undefined}
+                            format={(n) => Math.round(n).toString()}
                           />
                         </td>
                       </tr>
