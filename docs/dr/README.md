@@ -1,40 +1,57 @@
-# Disaster Recovery + Incident Response
+# Disaster Recovery
 
-Operational baseline for any Clipstack-core deployment — hosted SaaS, design-partner self-host, or solo self-host. Per Doc 5 §1.7.
+Operational baseline for any Clipstack-core deployment — hosted SaaS, design-partner self-host, or solo self-host. Per Doc 5 §1.7 and the targets locked in `clipstack/CLAUDE.md` § Deployment state.
 
-## What's in here
+The runbooks below assume you have read the platform's failure-mode catalogue in [runbook.md](./runbook.md) and the live-incident procedure in [incident-response.md](./incident-response.md). What's new in this directory is the per-resource recovery procedure: when a specific tier of state is lost, this is the document you open first.
 
-| File | Purpose |
+## Targets
+
+Two numbers govern everything else.
+
+- **RPO (Recovery Point Objective)** — the maximum data loss the platform tolerates. Measured backwards from the moment of failure: anything written more than RPO ago is restorable; anything written inside the RPO window may be lost.
+- **RTO (Recovery Time Objective)** — the maximum downtime the platform tolerates. Measured forward from the moment of failure: service must be back within RTO.
+
+The published platform targets are **RPO 15 minutes / RTO 1 hour** for Tier-1 resources. Lower-tier resources have looser targets. Every resource the platform depends on is tagged below.
+
+## Tiered resources
+
+The matrix below is the source of truth. If a resource is missing from this table it has not been classified and its loss has no defined recovery procedure — flag that as a gap.
+
+| Tier | RPO | RTO | Resources | Loss impact |
+|---|---|---|---|---|
+| **1** | 15 min | 1 hr | Postgres: `drafts`, `approvals`, `audit_log`, `post_metrics`, `company_lessons`, `meter_events` | Revenue impact + customer trust. Drafts mid-approval lost, audit gap, metering gap. |
+| **2** | 1 hr | 4 hr | Bandit-orchestrator state (filesystem JSON per `BANDIT_DATA_DIR`) | Bandit posteriors reset to seeded priors; Strategist re-registers on next campaign cycle. |
+| **3** | 24 hr | 8 hr | Qdrant collections (voice corpora, lesson embeddings) | Workspaces re-train when noticed; voice scoring fails-soft to "untrained" in the interim. Not user-blocking. |
+| **4** | 24 hr | best-effort | Redpanda streams (9 named topics) | Real-time loop pauses; producers fail-soft, consumers re-subscribe at `latest` offset. Re-ingest from `post_metrics` if catastrophic. |
+| **5** | none | best-effort | LiteLLM (stateless router), Langfuse traces (telemetry-only) | Telemetry gap; no user-facing impact. |
+
+Tier-1 resources are the ones a paying customer notices on the same day. Everything else has a graceful-degradation path documented in `core/docs/closed-loop.md` § Fail-soft semantics.
+
+## Index
+
+| Runbook | Covers |
 |---|---|
-| [runbook.md](./runbook.md) | The DR runbook itself — RPO/RTO targets, replication topology, restore procedure, model fallback chains |
-| [incident-response.md](./incident-response.md) | Severity ladder, on-call expectations, communication template, postmortem format |
-| [sla.md](./sla.md) | What service availability we commit to, exclusions, credit policy |
-| [status-page.md](./status-page.md) | Status page contract — what statuses we publish, latency to publication, components covered |
+| [runbook-postgres.md](./runbook-postgres.md) | Postgres restore — single-region outage, data corruption, RLS-bypass leak. PITR procedure on Neon. |
+| [runbook-bandit-state.md](./runbook-bandit-state.md) | Bandit state restore from S3 per the backup module shipped in `services/bandit-orchestrator/BACKUP.md`. |
+| [runbook-services.md](./runbook-services.md) | Full service-mesh recovery — total deployment loss, bootstrap order, reconciler procedure. |
+| [runbook-data-corruption.md](./runbook-data-corruption.md) | Cross-tenant data-leak procedure — containment, investigation, regulatory notification. |
 
-## The shape of the commitment (Phase A.1)
+The pre-existing runbooks (`runbook.md`, `incident-response.md`, `sla.md`, `status-page.md`) cover the platform-wide contract, severity ladder, and external commitments. The four files above cover the per-resource mechanics.
 
-| Metric | Target | What it means |
-|---|---|---|
-| **RPO** | 15 minutes | Maximum data loss in a regional failure |
-| **RTO** | 1 hour | Maximum time to restore service in a regional failure |
-| **Uptime SLA** | 99.5% / month | Excluding scheduled maintenance announced 48h ahead |
-| **Incident Sev-1 first response** | 15 minutes | Acknowledgement, not resolution |
-| **Sev-1 resolution target** | 4 hours | Or status update every 1 hour until resolved |
-| **Postmortem publication** | 5 business days | After Sev-1 / Sev-2 incident closes |
+## Drill cadence
 
-These are **targets**, not contractual SLAs by default. SLAs above 99.5% are an Enterprise-tier add-on per the ToS. Self-hosters set their own targets — the runbooks ship as defaults you can adopt.
+Quarterly minimum, plus before any major release. Per security best practice and the SOC 2 CC7.5 control. The cadence and outcomes are tracked in [drill-log.md](./drill-log.md) — that file is empty until the first drill ships.
 
-## What ships in A.1
+Three drill types rotate through the year:
 
-- ✅ Runbook documenting the contract + operational steps (no live infra yet)
-- ✅ Incident-response procedure
-- ✅ SLA template with exclusions and credit policy
-- ✅ Status-page contract — what we'd publish, when
+- **Postgres PITR drill** — simulate corruption, restore to a Neon branch, validate. ~30 min wall-clock.
+- **Bandit state restore** — zero out the orchestrator volume, restore from S3, validate. ~10 min wall-clock.
+- **Full mesh recovery** — provision a fresh deploy from scratch using `runbook-services.md`. ~3 hr wall-clock.
 
-## What lands in A.2 / A.3
+The first drill of any new resource class (e.g. when Qdrant snapshots become contractually load-bearing) gets logged separately and added to the rotation.
 
-- Cross-region Postgres replica + failover procedure (cloud infra)
-- Object-storage replication
-- Status page deployment (Statuspage.io / Atlassian / self-hosted upptime)
-- On-call rotation tooling (PagerDuty / OpsGenie / similar)
-- Quarterly DR drill — restore from snapshot to a fresh region; measure RTO
+## On-call escalation
+
+Once paid customers exist, escalation flows through the on-call rotation documented in [incident-response.md](./incident-response.md) § On-call expectations. Pre-revenue, the escalation policy is "Jake during business hours, async issue queue otherwise." The published status page should reflect this honestly — no false uptime promises.
+
+**Update with your team's escalation policy** — if you're a self-hoster, replace this section with your own rotation, paging tool, and secondary-responder contact. The platform default assumes the runbook is the authority; teams that operate Clipstack at scale will need PagerDuty / OpsGenie / Grafana OnCall configured as the primary trigger.
