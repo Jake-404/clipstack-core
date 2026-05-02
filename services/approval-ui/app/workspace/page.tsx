@@ -1,0 +1,64 @@
+// Placeholder for the Workspace surface — Doc 7 §6 (Agency / Brand Kit).
+// Sidebar entry exists; this view ships when the brand-kit spec lands.
+// The shell mirrors /experiments and /drafts so the navigation feels
+// consistent rather than half-built.
+
+import Link from "next/link";
+import { ArrowLeft } from "lucide-react";
+
+import { AppShell } from "@/components/layout/AppShell";
+import { Card } from "@/components/ui/card";
+
+export default async function WorkspacePage() {
+  return (
+    <AppShell title="workspace">
+      <div className="p-6 max-w-5xl mx-auto">
+        <Link
+          href="/"
+          className="inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors duration-fast mb-4"
+        >
+          <ArrowLeft className="h-4 w-4" aria-hidden />
+          mission control
+        </Link>
+
+        <div className="mb-6">
+          <h1 className="text-2xl font-semibold text-text-primary mb-2">
+            workspace
+          </h1>
+          <p className="text-sm text-text-tertiary">
+            Your agency&apos;s brand identity. Tone, anti-tone, voice
+            exemplars, glossary, banned words.
+          </p>
+        </div>
+
+        <Card size="medium" tone="default">
+          <p className="text-sm text-text-secondary leading-relaxed mb-4">
+            The brand kit is where your voice lives. Every draft the
+            Strategist generates pulls from these exemplars; the voice
+            scorer measures cosine distance against them; the critic-reviser
+            loop checks every line against your banned-word list before a
+            draft enters the approval queue.
+          </p>
+          <ul className="space-y-1.5 text-sm text-text-secondary">
+            <li>Edit voice exemplars that anchor every generation</li>
+            <li>Manage banned-word and glossary lists per client</li>
+            <li>Upload brand assets — logos, palettes, type, motion</li>
+            <li>Per-client tone overrides for multi-brand agencies</li>
+          </ul>
+          <p className="mt-4 text-xs text-text-tertiary">
+            Coming next — track progress in{" "}
+            <span className="font-mono">core/docs/closed-loop.md</span>.
+          </p>
+        </Card>
+
+        <div className="mt-8 flex items-center gap-4 text-xs text-text-tertiary">
+          <span className="font-mono tabular-nums">workspace</span>
+          <span>·</span>
+          <span>placeholder</span>
+          <span>·</span>
+          <span>ships when spec lands</span>
+        </div>
+      </div>
+    </AppShell>
+  );
+}
