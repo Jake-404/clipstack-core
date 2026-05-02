@@ -43,6 +43,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
 from histograms import severity_from_zscore, update_and_rank, zscore
+from persist import persist_batch
 from producer import EventProducer
 from velocity import update_and_compute as update_velocity
 
@@ -166,6 +167,11 @@ class IngestResponse(BaseModel):
     # Number of content.metric_update events emitted to Redpanda.
     # 0 in stub mode or when EVENTBUS_ENABLED=false.
     events_emitted: int = 0
+    # Number of post_metrics rows persisted to Postgres via approval-ui's
+    # POST route. 0 when APPROVAL_UI_BASE_URL/SERVICE_TOKEN are unset or
+    # the route returned 5xx. Independent of events_emitted — either path
+    # may succeed/fail without blocking the other.
+    persisted_count: int = 0
     skipped: bool = True
 
 
@@ -413,6 +419,22 @@ async def ingest(req: IngestRequest) -> IngestResponse:
             [(key, value) for key, value in anomaly_items],
         )
 
+    # Durable persistence path — fan out to approval-ui's post_metrics
+    # POST route alongside the bus emission. The two writes are
+    # independent: bus is real-time signal for bandits + anomaly
+    # consumers; Postgres is durable history for historical retrieval +
+    # nightly rollups. Failure of either does not block the inbound
+    # request — bus emission already counted above; persist failures
+    # are logged + reflected in the response shape via persisted_count.
+    persisted_ok = False
+    persisted_count = 0
+    if req.snapshots:
+        persisted_ok, persisted_count = await persist_batch(
+            req.company_id,
+            req.client_id,
+            [s.model_dump() for s in req.snapshots],
+        )
+
     log.info(
         "ingest.completed",
         request_id=request_id,
@@ -422,6 +444,8 @@ async def ingest(req: IngestRequest) -> IngestResponse:
         events_emitted=emitted,
         anomalies_built=len(anomaly_items),
         anomalies_emitted=anomalies_emitted,
+        persisted_ok=persisted_ok,
+        persisted_count=persisted_count,
     )
 
     # `events_emitted` stays the metric_update count (its existing
@@ -433,6 +457,7 @@ async def ingest(req: IngestRequest) -> IngestResponse:
         accepted_count=len(req.snapshots),
         duplicate_count=0,
         events_emitted=emitted,
+        persisted_count=persisted_count,
         skipped=False,
     )
 
