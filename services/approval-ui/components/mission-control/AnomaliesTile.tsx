@@ -11,6 +11,7 @@
 // definition rare; the tile's job is to make them legible the
 // moment they appear, not to fill space.
 
+import Link from "next/link";
 import { ArrowDownRight, ArrowUpRight } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardHeader, CardLabel } from "@/components/ui/card";
@@ -100,31 +101,33 @@ export function AnomaliesTile({
               : "text-status-danger";
             const key = `${d.draft_id}-${d.platform}-${d.metric}-${idx}`;
             return (
-              <li
-                key={key}
-                className="flex items-baseline justify-between gap-3"
-              >
-                <div className="flex flex-col gap-0.5 min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5 text-text-primary">
-                    <Icon className={`h-3.5 w-3.5 shrink-0 ${zTone}`} aria-hidden />
-                    <span className="font-mono tabular-nums text-xs">
-                      {shortDraftId(d.draft_id)}
-                    </span>
-                    <span className="text-text-secondary truncate">
-                      · {d.platform} · {d.metric}
+              <li key={key}>
+                <Link
+                  href={`/drafts/${d.draft_id}`}
+                  className="flex items-baseline justify-between gap-3 -mx-2 px-2 py-1 rounded hover:bg-bg-elevated transition-colors duration-fast"
+                >
+                  <div className="flex flex-col gap-0.5 min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5 text-text-primary">
+                      <Icon className={`h-3.5 w-3.5 shrink-0 ${zTone}`} aria-hidden />
+                      <span className="font-mono tabular-nums text-xs">
+                        {shortDraftId(d.draft_id)}
+                      </span>
+                      <span className="text-text-secondary truncate">
+                        · {d.platform} · {d.metric}
+                      </span>
+                    </div>
+                    <span className="text-xs text-text-tertiary font-mono tabular-nums">
+                      {formatValue(d.value)} (μ {formatValue(d.rolling_mean)} ±{" "}
+                      {formatValue(d.rolling_std)})
                     </span>
                   </div>
-                  <span className="text-xs text-text-tertiary font-mono tabular-nums">
-                    {formatValue(d.value)} (μ {formatValue(d.rolling_mean)} ±{" "}
-                    {formatValue(d.rolling_std)})
+                  <span
+                    className={`font-mono tabular-nums shrink-0 text-sm ${zTone}`}
+                    title={`z-score (signed)`}
+                  >
+                    {formatZScore(d.z_score)}
                   </span>
-                </div>
-                <span
-                  className={`font-mono tabular-nums shrink-0 text-sm ${zTone}`}
-                  title={`z-score (signed)`}
-                >
-                  {formatZScore(d.z_score)}
-                </span>
+                </Link>
               </li>
             );
           })}
