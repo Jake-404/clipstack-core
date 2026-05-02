@@ -10,7 +10,7 @@
 
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 
 import { AppShell } from "@/components/layout/AppShell";
 import { Badge } from "@/components/ui/badge";
@@ -58,13 +58,27 @@ async function fetchActivity(): Promise<ActivityRow[]> {
         // The two LEFT JOINs each gate on actorKind so a stray cross-table
         // match (e.g. a user UUID that happens to coincide with an agent
         // UUID) can't bleed display names across actor classes.
+        //
+        // auditLog.actorId is TEXT (so 'system' actors with no row to
+        // reference are still representable) while users.id / agents.id
+        // are UUID. Postgres has no implicit text↔uuid cast, so the join
+        // condition uses an explicit ::uuid cast inside a guard that
+        // skips rows whose actor_id isn't a valid UUID — that way a
+        // 'system' actor (actor_id NULL or non-UUID string) matches
+        // neither side rather than blowing up the whole query.
         .leftJoin(
           users,
-          and(eq(auditLog.actorKind, "user"), eq(auditLog.actorId, users.id)),
+          and(
+            eq(auditLog.actorKind, "user"),
+            sql`${auditLog.actorId} IS NOT NULL AND ${auditLog.actorId} ~ '^[0-9a-fA-F-]{36}$' AND ${auditLog.actorId}::uuid = ${users.id}`,
+          ),
         )
         .leftJoin(
           agents,
-          and(eq(auditLog.actorKind, "agent"), eq(auditLog.actorId, agents.id)),
+          and(
+            eq(auditLog.actorKind, "agent"),
+            sql`${auditLog.actorId} IS NOT NULL AND ${auditLog.actorId} ~ '^[0-9a-fA-F-]{36}$' AND ${auditLog.actorId}::uuid = ${agents.id}`,
+          ),
         )
         .orderBy(desc(auditLog.occurredAt))
         .limit(ROW_LIMIT),
@@ -159,11 +173,46 @@ function truncate(value: string, max: number): string {
   return `${value.slice(0, max - 1)}…`;
 }
 
+// Keys that may carry free-text user content or PII and must NEVER reach
+// the activity feed verbatim. Audit writers that need to record one of
+// these should store a length / hash / id instead — see the existing
+// `emailLength` and `rationaleLength` patterns in the auth-callback and
+// approve/deny routes. Any unrecognised key whose value looks like an
+// email also gets redacted by the value-shape check below.
+const DETAILS_KEY_DENYLIST = new Set<string>([
+  "rationale",
+  "denyRationale",
+  "email",
+  "user_email",
+  "userEmail",
+  "name",
+  "fullName",
+  "phone",
+  "phoneNumber",
+  "address",
+  "ip",
+  "ipAddress",
+  "body",
+  "text",
+  "draftBody",
+  "transcript",
+  "secret",
+  "token",
+  "apiKey",
+  "password",
+  "credential",
+]);
+
+const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 // Format detailsJson as `key=value · key=value`, mono. Nullish values are
 // dropped; objects/arrays serialize via JSON so a nested payload still
 // reads as a single value cell rather than "[object Object]". Each value
 // caps at 60 chars so a long URL or transcript snippet can't blow up the
-// row height.
+// row height. Values whose KEYS match the denylist are redacted to
+// `key=•redacted` and values that LOOK like emails are masked locally so
+// activity browsing can never accidentally surface human PII even if a
+// future writer forgets the length-only convention.
 function formatDetails(
   details: Record<string, unknown> | null,
 ): string | null {
@@ -174,9 +223,14 @@ function formatDetails(
   if (entries.length === 0) return null;
 
   const parts = entries.map(([k, v]) => {
+    if (DETAILS_KEY_DENYLIST.has(k)) {
+      return `${k}=•redacted`;
+    }
     let raw: string;
     if (typeof v === "string") {
-      raw = v;
+      raw = EMAIL_SHAPE.test(v)
+        ? `${v.split("@")[0]}@…`
+        : v;
     } else if (typeof v === "number" || typeof v === "boolean") {
       raw = String(v);
     } else {
