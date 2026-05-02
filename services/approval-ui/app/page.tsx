@@ -383,13 +383,30 @@ interface KpiMetrics {
   // Month-to-date AI spend in USD (sum of meter_events.totalCostUsd
   // for the current calendar month). 0 if nothing metered yet.
   spendMtd: number;
+  // 7-day daily CTR series (one element per day, oldest → newest).
+  // 0 when impressions=0 OR no rows for that day. Drives the CTR
+  // tile's inline sparkline.
+  ctr7dTrend: number[];
+  // 7-day daily SUM(reach) series, oldest → newest. 0 for missing days.
+  reach7dTrend: number[];
+  // MTD daily SUM(meterEvents.totalCostUsd) series from start of
+  // current calendar month UTC → today, oldest → newest. Variable
+  // length 1..31. 0 for days with no metered events.
+  spendMtdTrend: number[];
 }
 
 async function fetchKpiMetrics(): Promise<KpiMetrics> {
   const session = await getSession();
   const companyId = session.activeCompanyId;
   if (!companyId) {
-    return { ctr7d: null, reach7d: 0, spendMtd: 0 };
+    return {
+      ctr7d: null,
+      reach7d: 0,
+      spendMtd: 0,
+      ctr7dTrend: [],
+      reach7dTrend: [],
+      spendMtdTrend: [],
+    };
   }
 
   try {
@@ -401,9 +418,30 @@ async function fetchKpiMetrics(): Promise<KpiMetrics> {
       Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
     );
 
-    const [{ ctr7d, reach7d, spendMtd }] = await withTenant(
-      companyId,
-      async (tx) => {
+    // Build day-bucket key arrays in JS up-front. Postgres only
+    // returns rows for days that have data — we need the full
+    // skeleton so missing days render as 0 rather than collapsing.
+    const today = new Date();
+    const days7: string[] = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(today);
+      d.setUTCHours(0, 0, 0, 0);
+      d.setUTCDate(d.getUTCDate() - i);
+      days7.push(d.toISOString().slice(0, 10));
+    }
+    const daysMtd: string[] = [];
+    {
+      const cursor = new Date(monthStart);
+      const end = new Date(today);
+      end.setUTCHours(0, 0, 0, 0);
+      while (cursor.getTime() <= end.getTime()) {
+        daysMtd.push(cursor.toISOString().slice(0, 10));
+        cursor.setUTCDate(cursor.getUTCDate() + 1);
+      }
+    }
+
+    const [{ ctr7d, reach7d, spendMtd, ctr7dTrend, reach7dTrend, spendMtdTrend }] =
+      await withTenant(companyId, async (tx) => {
         // Run the two SUMs over post_metrics + the SUM over
         // meter_events as separate selects. Drizzle doesn't naturally
         // express a 3-table aggregation in one statement; the txn
@@ -424,6 +462,61 @@ async function fetchKpiMetrics(): Promise<KpiMetrics> {
           .from(meterEvents)
           .where(gte(meterEvents.occurredAt, monthStart));
 
+        // Daily buckets — DATE_TRUNC('day', …)::date returns one row
+        // per day that has data. We pad missing days client-side.
+        // Same idx_post_metrics_company_platform index serves these
+        // queries since it leads with snapshot_at.
+        const pmDailyRows = await tx
+          .select({
+            day: sql<Date>`DATE_TRUNC('day', ${postMetrics.snapshotAt})::date`,
+            sumImpressions: sql<number>`COALESCE(SUM(${postMetrics.impressions}), 0)::float8`,
+            sumClicks: sql<number>`COALESCE(SUM(${postMetrics.clicks}), 0)::float8`,
+            sumReach: sql<number>`COALESCE(SUM(${postMetrics.reach}), 0)::float8`,
+          })
+          .from(postMetrics)
+          .where(gte(postMetrics.snapshotAt, sevenDaysAgo))
+          .groupBy(sql`DATE_TRUNC('day', ${postMetrics.snapshotAt})`)
+          .orderBy(asc(sql`DATE_TRUNC('day', ${postMetrics.snapshotAt})`));
+
+        const meterDailyRows = await tx
+          .select({
+            day: sql<Date>`DATE_TRUNC('day', ${meterEvents.occurredAt})::date`,
+            sumCost: sql<number>`COALESCE(SUM(${meterEvents.totalCostUsd}), 0)::float8`,
+          })
+          .from(meterEvents)
+          .where(gte(meterEvents.occurredAt, monthStart))
+          .groupBy(sql`DATE_TRUNC('day', ${meterEvents.occurredAt})`)
+          .orderBy(asc(sql`DATE_TRUNC('day', ${meterEvents.occurredAt})`));
+
+        // Index daily rows by YYYY-MM-DD so the day-walker can fill
+        // missing slots with 0. Drizzle hands back the ::date column
+        // as a Date; toISOString().slice(0,10) matches the JS-side
+        // skeleton keys exactly (both UTC).
+        const ctrDayMap = new Map<string, number>();
+        const reachDayMap = new Map<string, number>();
+        for (const r of pmDailyRows) {
+          const key =
+            r.day instanceof Date
+              ? r.day.toISOString().slice(0, 10)
+              : String(r.day).slice(0, 10);
+          const dayImp = Number(r.sumImpressions ?? 0);
+          const dayClk = Number(r.sumClicks ?? 0);
+          ctrDayMap.set(key, dayImp > 0 ? dayClk / dayImp : 0);
+          reachDayMap.set(key, Number(r.sumReach ?? 0));
+        }
+        const spendDayMap = new Map<string, number>();
+        for (const r of meterDailyRows) {
+          const key =
+            r.day instanceof Date
+              ? r.day.toISOString().slice(0, 10)
+              : String(r.day).slice(0, 10);
+          spendDayMap.set(key, Number(r.sumCost ?? 0));
+        }
+
+        const ctrTrend = days7.map((k) => ctrDayMap.get(k) ?? 0);
+        const reachTrend = days7.map((k) => reachDayMap.get(k) ?? 0);
+        const spendTrend = daysMtd.map((k) => spendDayMap.get(k) ?? 0);
+
         const imp = Number(pmRow?.sumImpressions ?? 0);
         const clk = Number(pmRow?.sumClicks ?? 0);
         return [
@@ -431,14 +524,30 @@ async function fetchKpiMetrics(): Promise<KpiMetrics> {
             ctr7d: imp > 0 ? clk / imp : null,
             reach7d: Number(pmRow?.sumReach ?? 0),
             spendMtd: Number(meterRow?.sumCost ?? 0),
+            ctr7dTrend: ctrTrend,
+            reach7dTrend: reachTrend,
+            spendMtdTrend: spendTrend,
           },
         ];
-      },
-    );
+      });
 
-    return { ctr7d, reach7d, spendMtd };
+    return {
+      ctr7d,
+      reach7d,
+      spendMtd,
+      ctr7dTrend,
+      reach7dTrend,
+      spendMtdTrend,
+    };
   } catch {
-    return { ctr7d: null, reach7d: 0, spendMtd: 0 };
+    return {
+      ctr7d: null,
+      reach7d: 0,
+      spendMtd: 0,
+      ctr7dTrend: [],
+      reach7dTrend: [],
+      spendMtdTrend: [],
+    };
   }
 }
 
@@ -687,6 +796,7 @@ export default async function MissionControlPage() {
             label="ctr · last 7d"
             value={kpis.ctr7d === null ? "—" : (kpis.ctr7d * 100).toFixed(2)}
             unit={kpis.ctr7d === null ? undefined : "%"}
+            trend={kpis.ctr7dTrend}
             size="medium"
             tone="default"
           />
@@ -696,6 +806,7 @@ export default async function MissionControlPage() {
           <MetricTile
             label="reach · last 7d"
             value={formatReach(kpis.reach7d)}
+            trend={kpis.reach7dTrend}
             size="medium"
           />
 
@@ -734,6 +845,7 @@ export default async function MissionControlPage() {
           <MetricTile
             label="ai spend · this month"
             value={`$${kpis.spendMtd.toFixed(2)}`}
+            trend={kpis.spendMtdTrend}
             size="medium"
             tone="default"
           />
