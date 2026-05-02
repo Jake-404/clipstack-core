@@ -27,7 +27,40 @@ def task_research(researcher: Agent, source_type: str, source_value: str) -> Tas
     )
 
 
-def task_strategise(strategist: Agent, platforms: list[str], context: list[Task]) -> Task:
+def task_strategise(
+    strategist: Agent,
+    platforms: list[str],
+    context: list[Task],
+    *,
+    company_id: str = "",
+    campaign_id: str = "",
+    variants_per_platform: int = 1,
+) -> Task:
+    """Editorial-brief generator. With variants_per_platform > 1, also
+    drafts N hook variants per platform and registers them with the
+    bandit-orchestrator via the `register_bandit` tool — closes the
+    Doc 4 §2.3 loop for Thompson allocation at publish time."""
+    if variants_per_platform > 1:
+        bandit_block = (
+            f"\n\nThis run uses bandit allocation (variants_per_platform="
+            f"{variants_per_platform}). For each platform in {platforms}, draft "
+            f"{variants_per_platform} hook variants with materially different "
+            "angles (different lead, different framing — not paraphrases). "
+            "Then call `register_bandit` ONCE per platform with:\n"
+            f"  company_id='{company_id}'\n"
+            f"  campaign_id='{campaign_id}'\n"
+            "  platform='<the platform>'\n"
+            "  message_pillar='<2-7 word phrase capturing the angle>'\n"
+            "  variants=[{variant_id, draft_id, body_excerpt, "
+            "predicted_percentile?}, ...]\n\n"
+            "draft_id should be a stable identifier the publish pipeline "
+            "will recognise (e.g. {campaign_id}-{platform}-v{n}). The "
+            "register_bandit tool returns a bandit_id; include it in the "
+            "editorial brief so downstream steps can reference it."
+        )
+    else:
+        bandit_block = ""
+
     return Task(
         description=(
             "Read the fact-sheet. Use `retrieve_high_performers` to surface 3 "
@@ -35,12 +68,23 @@ def task_strategise(strategist: Agent, platforms: list[str], context: list[Task]
             "Use `recall_lessons` to surface any captured editorial lessons "
             "that apply.\n\n"
             f"Decide: angle, target audience, primary CTA, platforms to ship "
-            f"({platforms}), 1-line hook for each platform.\n\n"
-            "Output: editorial brief that the LongFormWriter can execute against."
+            f"({platforms}), 1-line hook for each platform."
+            + bandit_block
+            + "\n\nOutput: editorial brief that the LongFormWriter can execute "
+              "against."
         ),
         agent=strategist,
         context=context,
-        expected_output="Editorial brief (markdown) with angle, audience, CTA, per-platform hooks.",
+        expected_output=(
+            "Editorial brief (markdown) with angle, audience, CTA, per-"
+            "platform hooks"
+            + (
+                ", and per-platform bandit_id when variants were generated"
+                if variants_per_platform > 1
+                else ""
+            )
+            + "."
+        ),
     )
 
 

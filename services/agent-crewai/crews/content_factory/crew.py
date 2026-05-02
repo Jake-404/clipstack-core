@@ -42,17 +42,30 @@ def build_content_factory_crew(
     platforms: list[str],
     source_type: str = "url",
     source_value: str = "",
+    campaign_id: str = "",
+    variants_per_platform: int = 1,
 ) -> Crew:
     """Assemble the crew. Phase A.0: builds without kicking off.
 
     Pass the assembled crew to `crew.kickoff(inputs={...})` once you're ready
     for live execution. Inputs are read by the Researcher's task description
     via the templated source_type/source_value already baked at build time.
+
+    Bandit allocation (Doc 4 §2.3): pass variants_per_platform > 1 to have
+    the Strategist generate N hook variants per platform and register them
+    with the bandit-orchestrator. Default 1 = single-variant (legacy
+    behaviour; no bandit handoff). Requires a campaign_id to scope the
+    bandits — falls back to "" which the orchestrator persists as-is.
     """
     unknown = set(platforms) - _VALID_PLATFORMS
     if unknown:
         raise ValueError(
             f"unknown platforms: {sorted(unknown)} (valid: {sorted(_VALID_PLATFORMS)})"
+        )
+    if variants_per_platform < 1 or variants_per_platform > 5:
+        raise ValueError(
+            "variants_per_platform must be in [1, 5] (Doc 4 §2.3 caps at 5 arms "
+            "per bandit per platform; the orchestrator's hard cap is 10)"
         )
 
     researcher = make_researcher()
@@ -66,7 +79,14 @@ def build_content_factory_crew(
     social_agents = {p: make_social_adapter(p) for p in platforms}
 
     t_research = task_research(researcher, source_type, source_value)
-    t_strat = task_strategise(strategist, platforms, context=[t_research])
+    t_strat = task_strategise(
+        strategist,
+        platforms,
+        context=[t_research],
+        company_id=company_id,
+        campaign_id=campaign_id,
+        variants_per_platform=variants_per_platform,
+    )
     t_long = task_long_form(writer, context=[t_strat])
     t_socials = [
         task_social_adapt(social_agents[p], p, context=[t_long]) for p in platforms

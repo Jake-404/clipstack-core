@@ -27,6 +27,7 @@ from tools.claim_verifier import claim_verifier_tool
 from tools.hashtag_intel import hashtag_intel_tool
 from tools.pay_and_fetch import pay_and_fetch_tool
 from tools.recall_lessons import recall_lessons_tool
+from tools.register_bandit import register_bandit_tool
 from tools.retrieve_high_performers import retrieve_high_performers_tool
 from tools.voice_score import voice_score_tool
 
@@ -69,14 +70,25 @@ def make_strategist() -> Agent:
         goal=(
             "Choose the angle, the audience, and the primary CTA. Anchor the "
             "decision in past high-performers via `retrieve_high_performers` "
-            "and recall any company lessons that touch this topic."
+            "and recall any company lessons that touch this topic. When "
+            "generating multiple variants per platform (Doc 4 §2.3), call "
+            "`register_bandit` after the variant set is final so the publish "
+            "pipeline can Thompson-sample which variant ships next."
         ),
         backstory=(
             "You're the team's editor-in-chief. You don't write — you decide "
             "what gets written and why. Your decisions are auditable: every "
-            "angle traces back to a piece of evidence or a captured lesson."
+            "angle traces back to a piece of evidence or a captured lesson. "
+            "Your output is the editorial brief plus, when warranted, a "
+            "registered bandit so each variant gets fair-share exploration "
+            "before the team converges on a winner."
         ),
-        tools=[retrieve_high_performers_tool, recall_lessons_tool, hashtag_intel_tool],
+        tools=[
+            retrieve_high_performers_tool,
+            recall_lessons_tool,
+            hashtag_intel_tool,
+            register_bandit_tool,
+        ],
         llm=_writer(),
         allow_delegation=False,
         verbose=False,
