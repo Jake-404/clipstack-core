@@ -123,12 +123,17 @@ export function ExperimentsTile({ bandits }: ExperimentsTileProps) {
             );
           })}
           {bandits.length > 4 && (
-            <li className="pt-1 text-xs text-text-tertiary flex items-center gap-1">
-              <span className="font-mono tabular-nums">
-                +{bandits.length - 4}
-              </span>{" "}
-              more
-              <ArrowUpRight className="h-3 w-3" aria-hidden />
+            <li className="pt-1">
+              <Link
+                href="/experiments"
+                className="inline-flex items-center gap-1 text-xs text-text-tertiary hover:text-text-secondary transition-colors duration-fast"
+              >
+                <span className="font-mono tabular-nums">
+                  +{bandits.length - 4}
+                </span>{" "}
+                more
+                <ArrowUpRight className="h-3 w-3" aria-hidden />
+              </Link>
             </li>
           )}
         </ul>
