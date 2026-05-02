@@ -305,6 +305,30 @@ class StateResponse(BaseModel):
     pruned_arms: list[str] = Field(default_factory=list)
 
 
+class BanditSummary(BaseModel):
+    """Compact view for the Mission Control experiments tile. Skips the
+    per-arm detail (a separate /state call fetches that for the
+    detail panel)."""
+
+    bandit_id: str
+    campaign_id: str
+    platform: Channel
+    message_pillar: str
+    algorithm: Algorithm
+    arm_count: int
+    active_arm_count: int   # arms minus pruned
+    total_allocations: int
+    total_rewards: int
+    leading_arm: str | None
+    leading_posterior_mean: float | None
+    created_at: str | None
+
+
+class BanditListResponse(BaseModel):
+    company_id: str
+    bandits: list[BanditSummary]
+
+
 # ─── Persistence ───────────────────────────────────────────────────────────
 
 
@@ -523,6 +547,64 @@ async def consumer_status() -> dict[str, Any]:
     stats: dict[str, Any] = dict(reward_consumer.stats)
     stats["draft_index_size"] = len(_draft_index)
     return stats
+
+
+@app.get("/bandits", response_model=BanditListResponse)
+async def list_bandits(
+    company_id: str,
+    campaign_id: str | None = None,
+    include_archived: bool = False,
+) -> BanditListResponse:
+    """List bandits for a workspace, optionally filtered by campaign.
+
+    Used by Mission Control's experiments tile — returns compact
+    summaries (no per-arm detail; that's what /state is for).
+
+    Defensive cross-tenant: every state file's company_id is verified
+    against the request's company_id before inclusion. State scanning
+    walks DATA_DIR (filesystem persistence; same directory the
+    register/allocate paths write to).
+
+    `include_archived`: future hook — once the bandit lifecycle adds an
+    explicit archived state, callers can opt out of completed
+    experiments. Today every bandit is "live" so this is a no-op flag.
+    """
+    if STUB_MODE:
+        return BanditListResponse(company_id=company_id, bandits=[])
+
+    summaries: list[BanditSummary] = []
+    for state in _scan_state_files():
+        if state.get("company_id") != company_id:
+            continue
+        if campaign_id and state.get("campaign_id") != campaign_id:
+            continue
+        arms = state.get("arms") or []
+        active = [a for a in arms if not a.get("pruned")] if isinstance(arms, list) else []
+        leader = _leading_arm(arms) if isinstance(arms, list) else None
+        leader_mean: float | None = None
+        if leader and isinstance(arms, list):
+            leader_arm = next((a for a in arms if a.get("variant_id") == leader), None)
+            if leader_arm:
+                leader_mean = _posterior_mean(leader_arm)
+        summaries.append(BanditSummary(
+            bandit_id=str(state.get("bandit_id") or ""),
+            campaign_id=str(state.get("campaign_id") or ""),
+            platform=state.get("platform", "x"),  # type: ignore[arg-type]
+            message_pillar=str(state.get("message_pillar") or ""),
+            algorithm=state.get("algorithm", "thompson"),  # type: ignore[arg-type]
+            arm_count=len(arms) if isinstance(arms, list) else 0,
+            active_arm_count=len(active),
+            total_allocations=int(state.get("total_allocations", 0) or 0),
+            total_rewards=int(state.get("total_rewards", 0) or 0),
+            leading_arm=leader,
+            leading_posterior_mean=leader_mean,
+            created_at=state.get("created_at"),  # type: ignore[arg-type]
+        ))
+
+    # Sort by created_at descending (newest first) so the tile renders
+    # the most recent experiments at the top.
+    summaries.sort(key=lambda s: s.created_at or "", reverse=True)
+    return BanditListResponse(company_id=company_id, bandits=summaries)
 
 
 @app.post("/bandits", response_model=RegisterArmsResponse)

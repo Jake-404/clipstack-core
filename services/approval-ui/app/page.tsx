@@ -6,9 +6,11 @@ import { AppShell } from "@/components/layout/AppShell";
 import { HeroKpiTile } from "@/components/mission-control/HeroKpiTile";
 import { ApprovalQueueTile } from "@/components/mission-control/ApprovalQueueTile";
 import { AgentActivityTile } from "@/components/mission-control/AgentActivityTile";
+import { ExperimentsTile, type BanditSummary } from "@/components/mission-control/ExperimentsTile";
 import { MetricTile } from "@/components/mission-control/MetricTile";
 import { Card, CardHeader, CardLabel } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { getSession } from "@/lib/api/session";
 
 // Mock data only — wired to real services in Phase A.0 step 6.
 // Real source: services/performance-ingest/ + services/agent-crewai/.
@@ -31,7 +33,54 @@ const agents = [
   { id: "qa",    label: "Brand QA",   role: "voice + safety",   shape: "octagon"      as const, color: "sky"     as const, status: "idle"    as const, recentAction: "blocked 1 draft this morning", costThisWeek: 0.67 },
 ];
 
-export default function MissionControlPage() {
+// Mission Control is a server component → it can directly call the
+// internal helpers (no need for an HTTP roundtrip back to its own
+// /api/companies/:cid/experiments route). This keeps the first paint
+// fast even when the bandit-orchestrator call is slow — Next.js
+// Streaming + suspense let us decompose further if it ever bites.
+async function fetchBandits(): Promise<BanditSummary[]> {
+  const session = await getSession();
+  const companyId = session.activeCompanyId;
+  if (!companyId) return [];
+
+  const baseUrl = process.env.BANDIT_ORCH_BASE_URL;
+  const token = process.env.SERVICE_TOKEN;
+  // Stub fallback — same offline-dev contract as the API route.
+  if (!baseUrl || !token) return [];
+
+  try {
+    const resp = await fetch(
+      `${baseUrl.replace(/\/$/, "")}/bandits?company_id=${encodeURIComponent(
+        companyId,
+      )}`,
+      {
+        headers: {
+          "X-Clipstack-Service-Token": token,
+          "X-Clipstack-Active-Company": companyId,
+          "X-Clipstack-Service-Name": "approval-ui",
+        },
+        signal: AbortSignal.timeout(5000),
+        // Mission Control polls in the background; let Next.js cache
+        // briefly so a refresh-spam doesn't hammer the orchestrator.
+        next: { revalidate: 15 },
+      },
+    );
+    if (!resp.ok) return [];
+    const payload = (await resp.json()) as {
+      bandits?: BanditSummary[];
+    };
+    return payload.bandits ?? [];
+  } catch {
+    // Fail-soft on outage — empty list renders the tile's "no
+    // experiments yet" state gracefully. Bus-status surfaces are
+    // the right place to alert on backend health.
+    return [];
+  }
+}
+
+export default async function MissionControlPage() {
+  const bandits = await fetchBandits();
+
   return (
     <AppShell title="Mission Control">
       <div className="p-6">
@@ -105,27 +154,12 @@ export default function MissionControlPage() {
             </div>
           </Card>
 
-          {/* Bandit experiments — Doc 4 §2.3 */}
-          <Card size="medium" tone="default">
-            <CardHeader>
-              <CardLabel>experiments</CardLabel>
-              <Badge variant="info">3 live</Badge>
-            </CardHeader>
-            <ul className="text-sm space-y-1.5">
-              <li className="flex items-center justify-between">
-                <span className="text-text-secondary">hook-length variants</span>
-                <span className="font-mono tabular-nums text-text-primary">+18%</span>
-              </li>
-              <li className="flex items-center justify-between">
-                <span className="text-text-secondary">cta placement</span>
-                <span className="font-mono tabular-nums text-text-primary">+04%</span>
-              </li>
-              <li className="flex items-center justify-between">
-                <span className="text-text-secondary">emoji density (linkedin)</span>
-                <span className="font-mono tabular-nums text-status-danger">-07%</span>
-              </li>
-            </ul>
-          </Card>
+          {/* Bandit experiments — Doc 4 §2.3. Real data: each row was
+              registered by the Strategist (register_bandit tool), gets
+              allocated by publish_pipeline's bandit_allocate node, and
+              accumulates rewards via bandit-orchestrator's auto-reward
+              consumer subscribed to content.metric_update. */}
+          <ExperimentsTile bandits={bandits} />
         </div>
 
         {/* Footer rail — three-excellence reminder per Doc 7 §13. */}
