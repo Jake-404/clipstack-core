@@ -437,6 +437,73 @@ def _leading_arm(arms: list[dict[str, Any]]) -> str | None:
     return max(active, key=_posterior_mean)["variant_id"]
 
 
+# ─── Pruning (Doc 4 §2.3 step 4) ──────────────────────────────────────────
+
+
+# Default: prune arms whose posterior mean is ≥ 0.15 below the leader.
+# At Beta(α, β) means in [0, 1], 0.15 = 15 percentile points → meaningful
+# gap, not noise. Workspace-tunable via env override.
+PRUNE_THRESHOLD: float = float(os.getenv("BANDIT_PRUNE_THRESHOLD", "0.15"))
+
+
+def _bandit_age_hours(state: dict[str, Any]) -> float:
+    """Hours since the bandit was registered. Returns infinity for
+    bandits with malformed/missing created_at so the observation-window
+    gate doesn't accidentally skip pruning on bad state."""
+    created = state.get("created_at")
+    if not isinstance(created, str):
+        return float("inf")
+    try:
+        dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+    except ValueError:
+        return float("inf")
+    return (datetime.now(UTC) - dt).total_seconds() / 3600.0
+
+
+def _apply_pruning(state: dict[str, Any], threshold: float) -> list[str]:
+    """Re-evaluate every arm against the current leader. Mark arms whose
+    posterior mean is ≥ threshold below the leader as pruned. Mutates
+    `state` in place; returns the list of newly-pruned variant_ids for
+    audit logging.
+
+    Pruning is non-monotonic: an arm that drops below threshold and is
+    pruned can flip back to active if subsequent observations recover
+    its posterior. This makes the consumer's continuous posterior
+    updates productive — no need to special-case "I was wrong about
+    this arm." Doc 4 §2.3 says low-performers are pruned at the
+    observation window; we let them un-prune if the data flips, which
+    is more responsive at the cost of slightly noisier allocation.
+    """
+    arms: list[dict[str, Any]] = state.get("arms") or []
+    if len(arms) < 2:
+        return []  # nothing meaningful to prune against
+
+    leader_mean = max(_posterior_mean(a) for a in arms)
+    newly_pruned: list[str] = []
+
+    for arm in arms:
+        currently_pruned = bool(arm.get("pruned"))
+        gap = leader_mean - _posterior_mean(arm)
+        should_prune = gap >= threshold and gap > 0
+        if should_prune and not currently_pruned:
+            arm["pruned"] = True
+            newly_pruned.append(str(arm.get("variant_id") or ""))
+        elif not should_prune and currently_pruned:
+            # Posterior recovered — un-prune.
+            arm["pruned"] = False
+
+    if newly_pruned:
+        existing = list(state.get("pruned_arms") or [])
+        # Persist the chronological prune log too — useful for ops to
+        # see "this arm got pruned at run N" even after it un-prunes.
+        for vid in newly_pruned:
+            if vid not in existing:
+                existing.append(vid)
+        state["pruned_arms"] = existing
+
+    return newly_pruned
+
+
 # ─── Endpoints ─────────────────────────────────────────────────────────────
 
 
@@ -545,6 +612,23 @@ async def allocate(bandit_id: str, req: AllocateRequest) -> AllocateResponse:
         # Defensive cross-tenant check at the service boundary even though
         # the route should already be company-scoped upstream.
         raise HTTPException(status_code=403, detail="bandit belongs to a different workspace")
+
+    # Pruning gate (Doc 4 §2.3 step 4): once the bandit has run past
+    # its observation window, mark arms whose posterior mean is ≥
+    # PRUNE_THRESHOLD below the leader. Pruning is re-evaluated on
+    # every allocate so an arm that recovers can flip back to active.
+    obs_window = float(state.get("observation_window_hours", 72))
+    age_h = _bandit_age_hours(state)
+    if age_h >= obs_window:
+        newly_pruned = _apply_pruning(state, PRUNE_THRESHOLD)
+        if newly_pruned:
+            log.info(
+                "bandit.pruned",
+                bandit_id=bandit_id,
+                age_hours=age_h,
+                threshold=PRUNE_THRESHOLD,
+                newly_pruned=newly_pruned,
+            )
 
     rng = random.Random()  # noqa: S311 — Thompson sampling uses non-cryptographic RNG by design
     chosen, score, rationale = _thompson_pick(
