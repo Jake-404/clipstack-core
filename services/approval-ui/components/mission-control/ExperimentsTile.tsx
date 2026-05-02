@@ -12,6 +12,7 @@
 // click a row → variant detail panel showing per-arm posteriors via
 // /bandits/:id/state.
 
+import Link from "next/link";
 import { ArrowUpRight } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardHeader, CardLabel } from "@/components/ui/card";
@@ -96,26 +97,28 @@ export function ExperimentsTile({ bandits }: ExperimentsTileProps) {
                   : "text-status-warning";
 
             return (
-              <li
-                key={b.bandit_id}
-                className="flex items-baseline justify-between gap-3"
-              >
-                <div className="flex flex-col gap-0.5 min-w-0 flex-1">
-                  <span className="text-text-primary truncate">
-                    {b.message_pillar || "(no pillar)"}
-                  </span>
-                  <span className="text-xs text-text-tertiary font-mono tabular-nums">
-                    {b.platform} · {b.active_arm_count}/{b.arm_count} arms ·{" "}
-                    {b.total_allocations} alloc · {b.total_rewards} rwd ·{" "}
-                    {formatAge(b.created_at)}
-                  </span>
-                </div>
-                <span
-                  className={`font-mono tabular-nums shrink-0 text-sm ${tone}`}
-                  title={`leader posterior mean × 100`}
+              <li key={b.bandit_id}>
+                <Link
+                  href={`/experiments/${b.bandit_id}`}
+                  className="flex items-baseline justify-between gap-3 -mx-2 px-2 py-1 rounded hover:bg-bg-elevated transition-colors duration-fast"
                 >
-                  {leaderMeanPct}
-                </span>
+                  <div className="flex flex-col gap-0.5 min-w-0 flex-1">
+                    <span className="text-text-primary truncate">
+                      {b.message_pillar || "(no pillar)"}
+                    </span>
+                    <span className="text-xs text-text-tertiary font-mono tabular-nums">
+                      {b.platform} · {b.active_arm_count}/{b.arm_count} arms ·{" "}
+                      {b.total_allocations} alloc · {b.total_rewards} rwd ·{" "}
+                      {formatAge(b.created_at)}
+                    </span>
+                  </div>
+                  <span
+                    className={`font-mono tabular-nums shrink-0 text-sm ${tone}`}
+                    title={`leader posterior mean × 100`}
+                  >
+                    {leaderMeanPct}
+                  </span>
+                </Link>
               </li>
             );
           })}
