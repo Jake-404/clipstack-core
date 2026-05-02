@@ -62,6 +62,7 @@ import structlog
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from backup import state_backup
 from consumer import RewardConsumer, build_draft_index_from_states
 
 log = structlog.get_logger()
@@ -215,7 +216,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             ),
         )
     await reward_consumer.start()
+    await state_backup.start()
     yield
+    await state_backup.stop()
     await reward_consumer.stop()
     log.info("shutdown", service="bandit-orchestrator")
 
@@ -642,6 +645,14 @@ async def consumer_status() -> dict[str, Any]:
     stats: dict[str, Any] = dict(reward_consumer.stats)
     stats["draft_index_size"] = len(_draft_index)
     return stats
+
+
+@app.get("/backup/status")
+async def backup_status() -> dict[str, Any]:
+    """Operator visibility into the periodic state-backup loop.
+    Surfaces enabled/bucket/prefix + last-run + lifetime counters so
+    ops can spot a wedged backup task before a restart loses state."""
+    return dict(state_backup.stats)
 
 
 @app.get("/bandits", response_model=BanditListResponse)

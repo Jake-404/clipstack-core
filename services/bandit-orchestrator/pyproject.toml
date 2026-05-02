@@ -25,8 +25,12 @@ ml = [
 # Auto-reward listener: subscribes to content.metric_update on Redpanda
 # and updates posteriors in-process. Closes the generate→publish→
 # measure→learn loop without a manual /reward roundtrip per metric.
+# boto3 powers the optional periodic S3-compatible state backup so a
+# container restart that loses the volume doesn't lose every workspace's
+# Thompson posteriors. Default-disabled; opt in via BANDIT_BACKUP_ENABLED.
 runtime = [
   "aiokafka>=0.12.0",
+  "boto3>=1.35.0",
 ]
 dev = [
   "ruff>=0.7.0",
