@@ -66,7 +66,11 @@ def task_strategise(
             "Read the fact-sheet. Use `retrieve_high_performers` to surface 3 "
             "past pieces in this topic that performed in the top quartile. "
             "Use `recall_lessons` to surface any captured editorial lessons "
-            "that apply.\n\n"
+            "that apply. Use `recent_anomalies` (lookback_hours=24, "
+            "z_threshold=2.5) to surface any drafts that just spiked or "
+            "collapsed — those are signal-rich moments: lean into the "
+            "framing of recent spikes; steer away from the framing of "
+            "recent drops.\n\n"
             f"Decide: angle, target audience, primary CTA, platforms to ship "
             f"({platforms}), 1-line hook for each platform."
             + bandit_block

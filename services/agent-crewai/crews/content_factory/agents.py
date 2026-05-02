@@ -27,6 +27,7 @@ from tools.claim_verifier import claim_verifier_tool
 from tools.hashtag_intel import hashtag_intel_tool
 from tools.pay_and_fetch import pay_and_fetch_tool
 from tools.recall_lessons import recall_lessons_tool
+from tools.recent_anomalies import recent_anomalies_tool
 from tools.register_bandit import register_bandit_tool
 from tools.retrieve_high_performers import retrieve_high_performers_tool
 from tools.voice_score import voice_score_tool
@@ -86,6 +87,7 @@ def make_strategist() -> Agent:
         tools=[
             retrieve_high_performers_tool,
             recall_lessons_tool,
+            recent_anomalies_tool,
             hashtag_intel_tool,
             register_bandit_tool,
         ],
