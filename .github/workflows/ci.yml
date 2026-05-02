@@ -137,3 +137,127 @@ jobs:
         run: |
           chmod +x tests/integration/run-rls-test.sh
           ./tests/integration/run-rls-test.sh
+
+  playwright-e2e:
+    # Page-level E2E for the approval-ui Mission Control + sibling routes.
+    # Brings up a real Postgres + applies migrations + runs the seed-demo
+    # script so AUTH_STUB resolves to the seeded "Demo Workspace" tenant
+    # and every page renders against deterministic data.
+    #
+    # Catches the bug class typecheck/build/ruff don't:
+    #   - server-component query errors that only surface at render time
+    #   - route-level redirects, 404s, and approval-form regressions
+    #   - the /api/health/services aggregator's envelope shape
+    name: playwright e2e
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # Same image + pgvector install path as the rls-integration job —
+        # postgres:16 (Debian) + apt-installed postgresql-16-pgvector. The
+        # pgvector/pgvector image's .control file isn't visible to the
+        # service container in GH Actions, so the boring path wins.
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: clipstack
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: services/approval-ui/pnpm-lock.yaml
+      - name: Install psql + pgvector
+        run: |
+          sudo apt-get install -y --no-install-recommends postgresql-client
+          docker exec --user root ${{ job.services.postgres.id }} bash -c "
+            apt-get update >/dev/null
+            apt-get install -y --no-install-recommends postgresql-16-pgvector
+          "
+      - name: Apply migrations in lexical order
+        env:
+          PGHOST: localhost
+          PGPORT: 5432
+          PGUSER: postgres
+          PGPASSWORD: postgres
+          PGDATABASE: clipstack
+        run: |
+          # Apply every migration in numeric order. The seed expects all
+          # 7 to be present (companies + RLS + RBAC trigger + post_metrics
+          # + content_claims + draft_revisions + vector embedding column).
+          for mig in services/shared/db/migrations/*.sql; do
+            echo "applying $(basename "$mig")"
+            psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" \
+              -v ON_ERROR_STOP=1 -f "$mig"
+          done
+      - name: Install approval-ui deps
+        working-directory: services/approval-ui
+        run: pnpm install --frozen-lockfile
+      - name: Run seed
+        working-directory: services/approval-ui
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/clipstack
+        run: pnpm exec tsx scripts/seed-demo.ts
+      - name: Install Playwright chromium
+        working-directory: services/approval-ui
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Run E2E tests
+        working-directory: services/approval-ui
+        env:
+          # Random session secrets per run. AUTH_STUB IDs match the seeded
+          # singleton company + user UUIDs so the session resolves the
+          # seeded tenant without WorkOS. Both PASSWORD + SECRET env names
+          # are exported because dev-setup.sh writes one and session.ts
+          # reads the other; covering both names keeps CI working
+          # regardless of which side eventually converges.
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/clipstack
+          AUTH_STUB_USER_ID: "00000000-0000-0000-0000-000000000002"
+          AUTH_STUB_COMPANY_ID: "00000000-0000-0000-0000-000000000001"
+          NODE_ENV: development
+          CI: "true"
+        run: |
+          SESSION_PWD="$(openssl rand -base64 48 | tr -d '=+/' | cut -c1-64)"
+          export SESSION_COOKIE_PASSWORD="$SESSION_PWD"
+          export SESSION_COOKIE_SECRET="$SESSION_PWD"
+          pnpm exec playwright test
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: services/approval-ui/playwright-report/
+          retention-days: 7
+
+  agent-service-tests:
+    # First-pass pytest coverage for the orchestration brain. Each service has
+    # its own tests/ tree (offline-stub mode — no Postgres / Redpanda / Qdrant /
+    # Ollama required). Catches the bug class lint + typecheck miss: input-
+    # schema regressions on the CrewAI tools, graph topology drift on the
+    # LangGraph publish pipeline, FastAPI route shape changes.
+    name: agent service tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [agent-crewai, agent-langgraph]
+    defaults:
+      run:
+        working-directory: services/${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: uv sync --extra dev
+      - run: uv run pytest tests/ -v

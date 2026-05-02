@@ -56,3 +56,8 @@ logs/
 .checkpoints/
 *.local.yaml
 *.local.json
+
+# ─── Playwright (approval-ui E2E) ──────────────────────────────────────────
+services/approval-ui/test-results/
+services/approval-ui/playwright-report/
+services/approval-ui/playwright/.cache/
