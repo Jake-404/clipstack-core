@@ -45,7 +45,7 @@ export default async function CalendarPage() {
             <li>Bulk reschedule when a launch date shifts</li>
           </ul>
           <p className="mt-4 text-xs text-text-tertiary">
-            Coming next — track progress in{" "}
+            Spec in flight. Roadmap +{" "}
             <span className="font-mono">core/docs/closed-loop.md</span>.
           </p>
         </Card>
@@ -53,9 +53,8 @@ export default async function CalendarPage() {
         <div className="mt-8 flex items-center gap-4 text-xs text-text-tertiary">
           <span className="font-mono tabular-nums">calendar</span>
           <span>·</span>
-          <span>placeholder</span>
-          <span>·</span>
-          <span>ships when spec lands</span>
+          <span>scheduling · in design</span>
+          <span className="ml-auto">build your dream</span>
         </div>
       </div>
     </AppShell>

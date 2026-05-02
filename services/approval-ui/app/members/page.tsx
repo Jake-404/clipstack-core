@@ -47,7 +47,7 @@ export default async function MembersPage() {
             <li>Suspend or remove members with revocation audit</li>
           </ul>
           <p className="mt-4 text-xs text-text-tertiary">
-            Coming next — track progress in{" "}
+            Spec in flight. Roadmap +{" "}
             <span className="font-mono">core/docs/closed-loop.md</span>.
           </p>
         </Card>
@@ -55,9 +55,8 @@ export default async function MembersPage() {
         <div className="mt-8 flex items-center gap-4 text-xs text-text-tertiary">
           <span className="font-mono tabular-nums">members</span>
           <span>·</span>
-          <span>placeholder</span>
-          <span>·</span>
-          <span>ships when spec lands</span>
+          <span>RBAC · in design</span>
+          <span className="ml-auto">build your dream</span>
         </div>
       </div>
     </AppShell>

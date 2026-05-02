@@ -46,7 +46,7 @@ export default async function SettingsPage() {
             <li>Audit-log retention and export</li>
           </ul>
           <p className="mt-4 text-xs text-text-tertiary">
-            Coming next — track progress in{" "}
+            Spec in flight. Roadmap +{" "}
             <span className="font-mono">core/docs/closed-loop.md</span>.
           </p>
         </Card>
@@ -54,9 +54,8 @@ export default async function SettingsPage() {
         <div className="mt-8 flex items-center gap-4 text-xs text-text-tertiary">
           <span className="font-mono tabular-nums">settings</span>
           <span>·</span>
-          <span>placeholder</span>
-          <span>·</span>
-          <span>ships when spec lands</span>
+          <span>workspace config · in design</span>
+          <span className="ml-auto">build your dream</span>
         </div>
       </div>
     </AppShell>
