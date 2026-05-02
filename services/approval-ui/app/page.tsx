@@ -11,10 +11,17 @@ import {
   type AnomalyDetection,
 } from "@/components/mission-control/AnomaliesTile";
 import { ExperimentsTile, type BanditSummary } from "@/components/mission-control/ExperimentsTile";
+import {
+  InstitutionalMemoryTile,
+  type LessonStats,
+} from "@/components/mission-control/InstitutionalMemoryTile";
 import { MetricTile } from "@/components/mission-control/MetricTile";
 import { Card, CardHeader, CardLabel } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { getSession } from "@/lib/api/session";
+import { withTenant } from "@/lib/db/client";
+import { companyLessons } from "@/lib/db/schema/lessons";
+import { count, sql } from "drizzle-orm";
 
 // Mock data only — wired to real services in Phase A.0 step 6.
 // Real source: services/performance-ingest/ + services/agent-crewai/.
@@ -83,6 +90,42 @@ async function fetchBandits(): Promise<BanditSummary[]> {
   }
 }
 
+async function fetchLessonStats(): Promise<LessonStats> {
+  const session = await getSession();
+  const companyId = session.activeCompanyId;
+  // No active workspace → empty stats. The tile renders cleanly on
+  // pre-onboarding sessions where the user hasn't picked a workspace.
+  if (!companyId) {
+    return { totalCount: 0, thisWeekCount: 0, clientScopedCount: 0 };
+  }
+
+  // Direct DB read via withTenant — RLS scopes the query to this
+  // workspace's lessons. No HTTP roundtrip; same process holds the
+  // pool. The single-statement triple-aggregate keeps the lock window
+  // tiny + lets Postgres parallelise the COUNT(*) FILTER (...) calls.
+  try {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const [row] = await withTenant(companyId, async (tx) =>
+      tx
+        .select({
+          total: count(),
+          thisWeek: sql<number>`COUNT(*) FILTER (WHERE ${companyLessons.capturedAt} >= ${sevenDaysAgo})`,
+          clientScoped: sql<number>`COUNT(*) FILTER (WHERE ${companyLessons.clientId} IS NOT NULL)`,
+        })
+        .from(companyLessons),
+    );
+    return {
+      totalCount: Number(row?.total ?? 0),
+      thisWeekCount: Number(row?.thisWeek ?? 0),
+      clientScopedCount: Number(row?.clientScoped ?? 0),
+    };
+  } catch {
+    // Mission Control should never crash on a stats query — the tile's
+    // empty state is the right fallback.
+    return { totalCount: 0, thisWeekCount: 0, clientScopedCount: 0 };
+  }
+}
+
 async function fetchAnomalies(): Promise<AnomalyDetection[]> {
   const session = await getSession();
   const companyId = session.activeCompanyId;
@@ -121,12 +164,13 @@ async function fetchAnomalies(): Promise<AnomalyDetection[]> {
 }
 
 export default async function MissionControlPage() {
-  // Fire both fetches in parallel — neither blocks the other; they're
-  // independent backends. Total wall-clock = max(t_bandits, t_anomalies)
-  // rather than t_bandits + t_anomalies.
-  const [bandits, anomalies] = await Promise.all([
+  // Fire all fetches in parallel — they're independent (HTTP to two
+  // services + one local DB read). Total wall-clock = max(t_bandits,
+  // t_anomalies, t_lessons) rather than the sum.
+  const [bandits, anomalies, lessonStats] = await Promise.all([
     fetchBandits(),
     fetchAnomalies(),
+    fetchLessonStats(),
   ]);
 
   return (
@@ -189,25 +233,10 @@ export default async function MissionControlPage() {
             tone="default"
           />
 
-          {/* Editorial memory — Doc 7 + the moat thesis */}
-          <Card size="medium" tone="accent">
-            <CardHeader>
-              <CardLabel>institutional memory</CardLabel>
-              <span className="text-xs text-text-tertiary font-mono tabular-nums">live</span>
-            </CardHeader>
-            <div className="space-y-2 text-sm">
-              <div className="flex items-baseline gap-2">
-                <span className="font-mono tabular-nums text-2xl font-semibold text-text-primary leading-none">
-                  487
-                </span>
-                <span className="text-xs text-text-tertiary">lessons captured</span>
-              </div>
-              <div className="text-xs text-text-tertiary">
-                <span className="font-mono tabular-nums text-status-success">+12</span> this week ·
-                73 client-specific tone exceptions
-              </div>
-            </div>
-          </Card>
+          {/* Editorial memory — Doc 7 + USP 5 moat. Real data: counts
+              come from a single triple-aggregate over company_lessons,
+              tenant-scoped via withTenant + RLS. */}
+          <InstitutionalMemoryTile stats={lessonStats} />
 
           {/* Bandit experiments — Doc 4 §2.3. Real data: each row was
               registered by the Strategist (register_bandit tool), gets
