@@ -327,7 +327,10 @@ async function fetchHeroKpi(): Promise<HeroKpi> {
           .where(
             and(
               gte(postMetrics.snapshotAt, fourteenDaysAgo),
-              sql`${postMetrics.snapshotAt} < ${sevenDaysAgo}`,
+              // ISO + ::timestamptz because postgres-js doesn't bind
+              // Date in raw sql template positions (gte() does, but
+              // this hand-written < literal doesn't).
+              sql`${postMetrics.snapshotAt} < ${sevenDaysAgo.toISOString()}::timestamptz`,
             ),
           );
 
@@ -577,12 +580,16 @@ async function fetchLessonStats(): Promise<LessonStats> {
   // pool. The single-statement triple-aggregate keeps the lock window
   // tiny + lets Postgres parallelise the COUNT(*) FILTER (...) calls.
   try {
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
     const [row] = await withTenant(companyId, async (tx) =>
       tx
         .select({
           total: count(),
-          thisWeek: sql<number>`COUNT(*) FILTER (WHERE ${companyLessons.capturedAt} >= ${sevenDaysAgo})`,
+          // postgres-js doesn't bind Date objects in raw `sql` template
+          // positions (only the drizzle operator helpers like gte/lte do
+          // the conversion). Pass an ISO string + cast explicitly to
+          // timestamptz so Postgres parses it without ambiguity.
+          thisWeek: sql<number>`COUNT(*) FILTER (WHERE ${companyLessons.capturedAt} >= ${sevenDaysAgo}::timestamptz)`,
           clientScoped: sql<number>`COUNT(*) FILTER (WHERE ${companyLessons.clientId} IS NOT NULL)`,
         })
         .from(companyLessons),
