@@ -23,7 +23,7 @@ for (const { path, name } of PLACEHOLDERS) {
     await page.goto(path);
 
     // Each placeholder uses an <h1> with the lowercase route name.
-    await expect(page.getByRole("heading", { name, exact: true })).toBeVisible();
+    await expect(page.locator("main").getByRole("heading", { name, exact: true })).toBeVisible();
 
     // Footer copy: every placeholder ends with "Spec in flight." Use a
     // case-insensitive regex so a future copy tweak (e.g. "Spec in flight…")

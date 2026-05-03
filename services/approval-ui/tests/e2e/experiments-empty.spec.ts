@@ -14,7 +14,7 @@ test("experiments page shows empty state when orchestrator is offline", async ({
   await page.goto("/experiments");
 
   await expect(
-    page.getByRole("heading", { name: "experiments", exact: true }),
+    page.locator("main").getByRole("heading", { name: "experiments", exact: true }),
   ).toBeVisible();
 
   // Empty-state copy lives inside a Card with the sentence that opens

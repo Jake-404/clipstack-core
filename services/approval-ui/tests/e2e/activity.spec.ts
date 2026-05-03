@@ -13,7 +13,7 @@ import { test, expect } from "@playwright/test";
 test("activity feed groups audit rows by date", async ({ page }) => {
   await page.goto("/activity");
 
-  await expect(page.getByRole("heading", { name: "activity", exact: true })).toBeVisible();
+  await expect(page.locator("main").getByRole("heading", { name: "activity", exact: true })).toBeVisible();
 
   // Each date section renders a YYYY-MM-DD heading inside <h2>. The seed
   // spreads events across the last 7 days so multiple date headings are

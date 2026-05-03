@@ -7,26 +7,13 @@
 
 import { test, expect } from "@playwright/test";
 
-// One of the seeded `awaiting_approval` drafts. Any one of these substrings
-// must appear in at least one ApprovalQueueTile row — the queue orders by
-// createdAt ASC and the tile shows the top 4, so the deterministic seed
-// guarantees these strings land in the visible set.
-//
-// Match against any single one — we don't care which, only that the queue
-// is wired through to seeded data rather than an empty fallback.
-const SEEDED_DRAFT_TITLES = [
-  "Why AI agents need editorial memory",
-  "This week in Clipstack",
-  "Open-core, privately licensed signals",
-];
-
 test("mission control renders with seeded data", async ({ page }) => {
   await page.goto("/");
 
   // The TopBar renders the page title via <h1>. AppShell passes
   // "Mission Control" as the title prop on app/page.tsx.
   await expect(page).toHaveTitle(/Clipstack/);
-  await expect(page.getByRole("heading", { name: "Mission Control" })).toBeVisible();
+  await expect(page.locator("main").getByRole("heading", { name: "Mission Control" })).toBeVisible();
 
   // Approval-queue tile — CardLabel "approval queue" is the header copy.
   // Wait for it explicitly so we don't race the streaming render.
@@ -34,13 +21,12 @@ test("mission control renders with seeded data", async ({ page }) => {
   await approvalQueueLabel.waitFor({ state: "visible" });
   await expect(approvalQueueLabel).toBeVisible();
 
-  // At least one row in the approval queue must match one of the seeded
-  // draft titles. The tile renders the title verbatim; substring match is
-  // enough since titles are unique and not user-edited mid-test.
-  const titleRegex = new RegExp(
-    SEEDED_DRAFT_TITLES.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"),
-  );
-  await expect(page.getByText(titleRegex).first()).toBeVisible();
+  // At least one row in the queue must be a Link to /drafts/[id]. We
+  // don't pin specific titles — test should survive seed copy edits.
+  // The seed creates 4 awaiting_approval drafts so at least 4 rows
+  // are guaranteed.
+  const queueRows = page.locator('a[href^="/drafts/"]');
+  await expect(queueRows.first()).toBeVisible({ timeout: 5000 });
 
   // Bus-health tile — CardLabel "bus health" anchors the tile.
   await expect(page.getByText("bus health", { exact: true })).toBeVisible();

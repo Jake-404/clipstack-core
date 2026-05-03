@@ -14,7 +14,7 @@ import { test, expect } from "@playwright/test";
 test("performance page renders KPI tiles and switches range", async ({ page }) => {
   await page.goto("/performance?range=7d");
 
-  await expect(page.getByRole("heading", { name: "performance", exact: true })).toBeVisible();
+  await expect(page.locator("main").getByRole("heading", { name: "performance", exact: true })).toBeVisible();
 
   // The 4 KPI tiles each render a CardLabel with the listed copy. The
   // MetricTile component renders the label as lowercase tracking-wider

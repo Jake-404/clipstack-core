@@ -14,7 +14,7 @@ test("inbox lists pending drafts and links to detail", async ({ page }) => {
   await page.goto("/inbox");
 
   // Page header anchor.
-  await expect(page.getByRole("heading", { name: "inbox", exact: true })).toBeVisible();
+  await expect(page.locator("main").getByRole("heading", { name: "inbox", exact: true })).toBeVisible();
 
   // The inbox renders rows as <li><a href="/drafts/<id>"> — count those
   // anchors directly. The seed produces 4 awaiting_approval + 2 in_review
