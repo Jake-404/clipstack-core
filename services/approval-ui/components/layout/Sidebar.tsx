@@ -95,7 +95,10 @@ function NavList({ onItemClick }: { onItemClick?: () => void }) {
                     onClick={onItemClick}
                     aria-current={active ? "page" : undefined}
                     className={cn(
-                      "flex items-center gap-2 px-2 py-1.5 rounded-md text-sm transition-colors duration-fast ease-default",
+                      // `group` here so the inner shortcut hint can use
+                      // group-hover/group-focus-within to fade in on
+                      // pointer + keyboard focus alike.
+                      "group flex items-center gap-2 px-2 py-1.5 rounded-md text-sm transition-colors duration-fast ease-default",
                       "focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-500",
                       active
                         ? "bg-bg-elevated text-text-primary"
@@ -105,7 +108,7 @@ function NavList({ onItemClick }: { onItemClick?: () => void }) {
                     <Icon className="h-4 w-4 shrink-0" aria-hidden />
                     <span className="flex-1 truncate">{item.label}</span>
                     {item.shortcut && (
-                      <span className="font-mono text-xs text-text-tertiary opacity-0 group-hover:opacity-100">
+                      <span className="font-mono text-xs text-text-tertiary opacity-0 transition-opacity duration-fast group-hover:opacity-100 group-focus-visible:opacity-100">
                         {item.shortcut}
                       </span>
                     )}

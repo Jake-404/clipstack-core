@@ -1,0 +1,25 @@
+{
+  // Standalone tsconfig for the Playwright e2e tests. The main `tsconfig.json`
+  // excludes `tests/e2e/**` + `playwright.config.ts` because Next's
+  // `tsc --noEmit` step doesn't ship Playwright types and would error on
+  // every spec file.
+  //
+  // This tsconfig opts those files in for IDE typechecking + an explicit
+  // `pnpm exec tsc -p tsconfig.e2e.json --noEmit` invocation when you want
+  // to verify the e2e suite compiles before pushing. It does NOT run by
+  // default in CI — `playwright test` itself transpiles with esbuild and
+  // surfaces type errors at run time, so the explicit typecheck is for
+  // local discipline rather than a gating step.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Playwright tests are CommonJS-friendly via tsx/esbuild, but the IDE
+    // needs the same module resolution as the app to follow `@/` imports.
+    "types": ["node"]
+  },
+  "include": [
+    "tests/e2e/**/*.ts",
+    "playwright.config.ts",
+    "next-env.d.ts"
+  ],
+  "exclude": ["node_modules"]
+}
