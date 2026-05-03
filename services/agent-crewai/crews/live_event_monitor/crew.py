@@ -83,9 +83,5 @@ def build_live_event_monitor_crew(*, company_id: str) -> Crew:
         process=Process.sequential,
         verbose=False,
         memory=False,
-    )
-    crew.metadata = {  # type: ignore[attr-defined]
-        "crew_id": "live_event_monitor",
-        "company_id": company_id,
-    }
+    )    # NOTE: Langfuse tag wiring removed — see content_factory/crew.py.
     return crew

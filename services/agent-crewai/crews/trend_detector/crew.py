@@ -105,11 +105,6 @@ def build_trend_detector_crew(
         process=Process.sequential,
         verbose=False,
         memory=False,
-    )
-    crew.metadata = {  # type: ignore[attr-defined]
-        "crew_id": "trend_detector",
-        "company_id": company_id,
-        "judge_model_for_safety": JUDGE_MODEL.name,
-    }
+    )    # NOTE: Langfuse tag wiring removed — see content_factory/crew.py.
     _ = _judge  # imported for future devil's-advocate-pair extension
     return crew

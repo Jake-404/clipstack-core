@@ -128,6 +128,8 @@ def build_content_factory_crew(
         verbose=False,
         memory=False,  # Persistent memory is `company_lessons` + Qdrant — not CrewAI-native.
     )
-    # Tag for Langfuse traces (Phase B). company_id flows through inputs at kickoff.
-    crew.metadata = {"crew_id": "content_factory", "company_id": company_id}  # type: ignore[attr-defined]
+    # NOTE: Langfuse trace tagging used to live here as `crew.metadata = {...}`
+    # but recent CrewAI / Pydantic tightening rejects extra attrs at runtime
+    # (not just statically). Tags now flow via `crew.kickoff(inputs={...})`
+    # at call time — see Langfuse instrumentation in observability.py.
     return crew

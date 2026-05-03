@@ -166,9 +166,9 @@ def test_task_list_ordered_research_strategy_long_form_socials_newsletter_critic
     assert "ClaimVerifier" in last_three[2]
 
 
-def test_crew_metadata_carries_crew_id_and_company_id() -> None:
-    crew = build_content_factory_crew(company_id="c_meta", platforms=["x"])
-    meta = getattr(crew, "metadata", None)
-    assert isinstance(meta, dict)
-    assert meta.get("crew_id") == "content_factory"
-    assert meta.get("company_id") == "c_meta"
+# NOTE: removed test_crew_metadata_carries_crew_id_and_company_id —
+# the underlying `crew.metadata = {...}` assignment was removed from
+# crew.py because recent CrewAI / Pydantic tightening rejects extra
+# attrs at runtime. Langfuse tag wiring now flows via crew.kickoff
+# inputs at call time. When the new tagging surface lands, add a
+# replacement test here.

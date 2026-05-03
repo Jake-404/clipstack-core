@@ -94,12 +94,7 @@ def build_engagement_crew(*, company_id: str, platform: str) -> Crew:
         process=Process.sequential,
         verbose=False,
         memory=False,
-    )
-    crew.metadata = {  # type: ignore[attr-defined]
-        "crew_id": "engagement",
-        "company_id": company_id,
-        "platform": platform,
-    }
+    )    # NOTE: Langfuse tag wiring removed — see content_factory/crew.py.
     _ = _writer  # imported for the draft-promotion path that lands when
     # auto-publish-on-whitelisted-reply-templates ships (post-A.3)
     return crew
