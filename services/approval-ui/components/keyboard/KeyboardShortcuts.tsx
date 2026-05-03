@@ -141,8 +141,18 @@ export function KeyboardShortcuts() {
       }
 
       // Bail on editable targets + open modals for everything below.
-      if (isEditableTarget(e.target)) return;
-      if (isModalOpen()) return;
+      // CRITICAL: clear any armed chord first — otherwise typing `g` →
+      // tabbing into a textarea → typing within 500ms would still fire
+      // the chord on the next non-editable keypress. The chord must NOT
+      // survive an editable-context interlude.
+      if (isEditableTarget(e.target)) {
+        chordRef.current = null;
+        return;
+      }
+      if (isModalOpen()) {
+        chordRef.current = null;
+        return;
+      }
 
       // `?` — Shift+/ on US layout. Fires from any non-editable surface.
       // Use e.key === "?" so it works regardless of how the OS maps
