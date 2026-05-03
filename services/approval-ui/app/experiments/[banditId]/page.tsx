@@ -19,6 +19,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { notFound } from "next/navigation";
+import { cache } from "react";
 
 import { AppShell } from "@/components/layout/AppShell";
 import { Badge } from "@/components/ui/badge";
@@ -54,7 +55,13 @@ interface BanditState {
 const PROXY_TIMEOUT_MS = 5000;
 const REVALIDATE_S = 15;
 
-async function fetchBanditState(banditId: string): Promise<BanditState | null> {
+// React.cache memoises within a single render pass — generateMetadata and
+// the page body both call fetchBanditState(banditId), and without cache()
+// that would mean two upstream HTTP roundtrips to bandit-orchestrator per
+// page render. cache() dedupes by argument equality for the request.
+const fetchBanditState = cache(async function fetchBanditState(
+  banditId: string,
+): Promise<BanditState | null> {
   const session = await getSession();
   const companyId = session.activeCompanyId;
   if (!companyId) return null;
@@ -92,7 +99,7 @@ async function fetchBanditState(banditId: string): Promise<BanditState | null> {
   } catch {
     return null;
   }
-}
+});
 
 function formatPosteriorMean(alpha: number, beta: number): string {
   const denom = alpha + beta;

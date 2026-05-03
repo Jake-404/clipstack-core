@@ -13,6 +13,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { notFound } from "next/navigation";
+import { cache } from "react";
 import { and, desc, eq } from "drizzle-orm";
 
 import { AppShell } from "@/components/layout/AppShell";
@@ -86,7 +87,11 @@ const STATUS_TONES: Record<string, BadgeTone> = {
   archived: "default",
 };
 
-async function fetchDraft(
+// React.cache memoises within a single render pass — generateMetadata and
+// the page body both call fetchDraft(draftId), and without cache() that
+// would mean two DB roundtrips per page render. cache() dedupes by argument
+// equality for the duration of the request.
+const fetchDraft = cache(async function fetchDraft(
   draftId: string,
 ): Promise<{ draft: DraftDetail; metrics: MetricRow[] } | null> {
   const session = await getSession();
@@ -147,7 +152,7 @@ async function fetchDraft(
   } catch {
     return null;
   }
-}
+});
 
 function formatNum(n: number | null): string {
   if (n === null) return "—";
