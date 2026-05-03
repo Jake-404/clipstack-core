@@ -57,8 +57,33 @@ function getSessionOptions(): SessionOptions {
  * Returns an empty SessionData object when no cookie is present — the route
  * boundary distinguishes "logged out" from "logged in" by checking the
  * presence of `workosUserId` + `activeCompanyId`.
+ *
+ * Dev/test fallback: when the cookie is empty AND AUTH_STUB_USER_ID +
+ * AUTH_STUB_COMPANY_ID are both set AND NODE_ENV !== "production", we
+ * populate the in-memory session with the stub values. This mirrors
+ * the resolveSession() behavior in lib/api/auth.ts so server-component
+ * pages (which call getSession() directly) and API routes (which call
+ * resolveSession()) both honour AUTH_STUB. The stub-mode populated
+ * fields are NOT persisted — calling session.save() on a stub-populated
+ * session is a no-op (iron-session writes back the cookie regardless,
+ * but the next request still hits the empty-cookie path and re-stubs).
  */
 export async function getSession() {
   const cookieStore = await cookies();
-  return getIronSession<SessionData>(cookieStore, getSessionOptions());
+  const session = await getIronSession<SessionData>(
+    cookieStore,
+    getSessionOptions(),
+  );
+
+  if (!session.activeCompanyId && process.env.NODE_ENV !== "production") {
+    const stubUserId = process.env.AUTH_STUB_USER_ID;
+    const stubCompanyId = process.env.AUTH_STUB_COMPANY_ID;
+    if (stubUserId && stubCompanyId) {
+      session.userId = stubUserId;
+      session.activeCompanyId = stubCompanyId;
+      session.authenticatedAt = session.authenticatedAt ?? new Date().toISOString();
+    }
+  }
+
+  return session;
 }
