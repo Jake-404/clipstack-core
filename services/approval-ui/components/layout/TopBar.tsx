@@ -28,9 +28,13 @@ export function TopBar({ title, onMobileMenuOpen }: TopBarProps) {
         <Menu className="h-5 w-5" aria-hidden />
       </button>
 
-      <h1 className="text-md font-semibold text-text-primary truncate min-w-0">
+      {/* Use a span here, not <h1> — the page body has the canonical
+          h1 ({title} again would be a duplicate heading that screen
+          readers announce twice + Playwright strict-mode rejects).
+          This bar shows workspace context; not a heading. */}
+      <span className="text-md font-semibold text-text-primary truncate min-w-0">
         {title}
-      </h1>
+      </span>
       <span className="hidden sm:inline ml-1 text-xs uppercase tracking-wider text-text-tertiary">
         live
       </span>

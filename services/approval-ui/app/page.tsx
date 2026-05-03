@@ -773,6 +773,12 @@ export default async function MissionControlPage() {
   return (
     <AppShell title="Mission Control">
       <div className="p-4 sm:p-6">
+        {/* Visually-hidden h1 — Doc 8 a11y. The bento layout doesn't
+            have a visible page title (TopBar shows workspace context,
+            not the heading). Screen readers + SEO crawlers + e2e
+            tests all rely on a real h1; sr-only keeps it out of the
+            visual layout. */}
+        <h1 className="sr-only">Mission Control</h1>
         {/* Doc 8 §9.2 — bento grid. 12 cols on desktop, stacks on mobile.
             On <md every Card auto-collapses to col-span-12 via the cva
             size variants in card.tsx, so the grid linearises cleanly.
