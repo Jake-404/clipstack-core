@@ -73,18 +73,23 @@ async function fetchActivity(): Promise<ActivityRow[]> {
         // skips rows whose actor_id isn't a valid UUID — that way a
         // 'system' actor (actor_id NULL or non-UUID string) matches
         // neither side rather than blowing up the whole query.
+        // Postgres evaluates the ::uuid cast eagerly even when guarded
+        // by an AND clause, so a non-UUID actor_id ('system' actor row)
+        // throws `invalid input syntax for type uuid`. The CASE WHEN
+        // approach makes the cast LITERALLY conditional — Postgres
+        // only runs it on the THEN branch when the regex matches.
         .leftJoin(
           users,
           and(
             eq(auditLog.actorKind, "user"),
-            sql`${auditLog.actorId} IS NOT NULL AND ${auditLog.actorId} ~ '^[0-9a-fA-F-]{36}$' AND ${auditLog.actorId}::uuid = ${users.id}`,
+            sql`(CASE WHEN ${auditLog.actorId} ~ '^[0-9a-fA-F-]{36}$' THEN ${auditLog.actorId}::uuid ELSE NULL END) = ${users.id}`,
           ),
         )
         .leftJoin(
           agents,
           and(
             eq(auditLog.actorKind, "agent"),
-            sql`${auditLog.actorId} IS NOT NULL AND ${auditLog.actorId} ~ '^[0-9a-fA-F-]{36}$' AND ${auditLog.actorId}::uuid = ${agents.id}`,
+            sql`(CASE WHEN ${auditLog.actorId} ~ '^[0-9a-fA-F-]{36}$' THEN ${auditLog.actorId}::uuid ELSE NULL END) = ${agents.id}`,
           ),
         )
         .orderBy(desc(auditLog.occurredAt))
