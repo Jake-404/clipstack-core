@@ -164,12 +164,9 @@ export default async function InboxPage() {
         </Link>
 
         <div className="mb-6">
-          {/* Visually a page-title; semantically an h2 because the
-              persistent TopBar already provides the canonical h1 with
-              the same text. Keeps the heading order valid. */}
-          <h2 className="text-2xl font-semibold text-text-primary mb-2">
+          <h1 className="text-2xl font-semibold text-text-primary mb-2">
             inbox
-          </h2>
+          </h1>
           <p className="text-sm text-text-tertiary">
             Drafts awaiting your decision. Oldest first — highest urgency
             at the top.

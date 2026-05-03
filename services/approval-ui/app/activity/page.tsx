@@ -292,11 +292,9 @@ export default async function ActivityPage() {
         </Link>
 
         <div className="mb-6">
-          {/* Visually a page-title; semantically an h2 because the
-              persistent TopBar already provides the canonical h1. */}
-          <h2 className="text-2xl font-semibold text-text-primary mb-2">
+          <h1 className="text-2xl font-semibold text-text-primary mb-2">
             activity
-          </h2>
+          </h1>
           <p className="text-sm text-text-tertiary">
             Every action your team and agents have taken. Newest first.
           </p>

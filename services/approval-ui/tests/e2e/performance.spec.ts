@@ -39,10 +39,11 @@ test("performance page renders KPI tiles and switches range", async ({ page }) =
   const platformRows = platformTable.locator("tbody tr");
   expect(await platformRows.count()).toBeGreaterThanOrEqual(1);
 
-  // Range pill click: each pill is a <Link> wrapped in a Badge.
-  // The "30d" pill has visible text "30d" inside an <a href> matching
-  // /performance?range=30d. Clicking should navigate.
-  const thirtyDayPill = page.getByRole("link", { name: "30d", exact: true });
+  // Range pill click: each pill is a <Link> wrapped in a Badge with
+  // an aria-label like "Set range to 30d". Match by visible text or
+  // by href attribute — the latter is the most stable since the
+  // aria-label may evolve as a11y copy is refined.
+  const thirtyDayPill = page.locator('a[href="/performance?range=30d"]').first();
   await thirtyDayPill.click();
   await expect(page).toHaveURL(/\/performance\?range=30d$/);
 });

@@ -15,10 +15,13 @@ test("activity feed groups audit rows by date", async ({ page }) => {
 
   await expect(page.locator("main").getByRole("heading", { name: "activity", exact: true })).toBeVisible();
 
-  // Each date section renders a YYYY-MM-DD heading inside <h2>. The seed
-  // spreads events across the last 7 days so multiple date headings are
-  // expected, but a single one is enough for the assertion.
-  const dateHeading = page.locator("h2").filter({ hasText: /^\d{4}-\d{2}-\d{2}$/ });
+  // Each date section renders a YYYY-MM-DD heading. We don't pin the
+  // tag (h2 vs h3) — the heading-level may shift as the page shell
+  // evolves. Match by text via a heading-role query so the assertion
+  // survives DOM-tree refactors.
+  const dateHeading = page
+    .getByRole("heading")
+    .filter({ hasText: /^\d{4}-\d{2}-\d{2}$/ });
   await dateHeading.first().waitFor({ state: "visible" });
   expect(await dateHeading.count()).toBeGreaterThanOrEqual(1);
 
