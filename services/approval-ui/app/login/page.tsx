@@ -12,7 +12,8 @@ import { type Metadata } from "next";
 import Link from "next/link";
 
 export const metadata: Metadata = {
-  title: "Sign in — Clipstack",
+  title: "Sign in · Clipstack",
+  description: "Sign in to your workspace.",
 };
 
 interface LoginPageProps {
@@ -52,7 +53,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
 
         <Link
           href={loginHref}
-          className="block w-full text-center px-4 py-2.5 rounded-md bg-accent-500 text-text-inverted font-medium transition-colors duration-fast ease-default hover:bg-accent-600"
+          className="block w-full text-center px-4 py-2.5 rounded-md bg-accent-500 text-text-inverted font-medium transition-colors duration-fast ease-default hover:bg-accent-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 focus-visible:ring-offset-2 focus-visible:ring-offset-bg-base"
         >
           Continue with WorkOS
         </Link>

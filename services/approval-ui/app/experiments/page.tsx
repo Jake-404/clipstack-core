@@ -8,6 +8,7 @@
 // Each row is a Link to /experiments/[banditId] so the path
 // discoverability is symmetric with the tile: tile → list → detail.
 
+import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 
@@ -16,6 +17,11 @@ import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { type BanditSummary } from "@/components/mission-control/ExperimentsTile";
 import { getSession } from "@/lib/api/session";
+
+export const metadata: Metadata = {
+  title: "Experiments · Clipstack",
+  description: "Live bandit experiments.",
+};
 
 const PROXY_TIMEOUT_MS = 5000;
 const REVALIDATE_S = 15;
@@ -87,10 +93,10 @@ export default async function ExperimentsListPage() {
 
   return (
     <AppShell title="experiments">
-      <div className="p-6 max-w-5xl mx-auto">
+      <div className="p-4 sm:p-6 max-w-5xl mx-auto">
         <Link
           href="/"
-          className="inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors duration-fast mb-4"
+          className="inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors duration-fast mb-4 rounded-sm focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-500"
         >
           <ArrowLeft className="h-4 w-4" aria-hidden />
           mission control
@@ -145,7 +151,7 @@ export default async function ExperimentsListPage() {
                         <li key={b.bandit_id}>
                           <Link
                             href={`/experiments/${b.bandit_id}`}
-                            className="flex items-baseline gap-3 py-3 hover:bg-bg-elevated transition-colors duration-fast -mx-2 px-2 rounded"
+                            className="flex items-baseline gap-3 py-3 hover:bg-bg-elevated transition-colors duration-fast -mx-2 px-2 rounded focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-500"
                           >
                             <div className="flex flex-col gap-0.5 min-w-0 flex-1">
                               <span className="text-sm text-text-primary truncate">
@@ -180,13 +186,13 @@ export default async function ExperimentsListPage() {
           </div>
         )}
 
-        <div className="mt-8 flex items-center gap-4 text-xs text-text-tertiary">
+        <div className="mt-8 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-text-tertiary">
           <span className="font-mono tabular-nums">
             {bandits.length} total
           </span>
-          <span>·</span>
+          <span aria-hidden>·</span>
           <span>thompson sampling · doc 4 §2.3</span>
-          <span className="ml-auto">live · &lt;15s lag</span>
+          <span className="md:ml-auto">live · &lt;15s lag</span>
         </div>
       </div>
     </AppShell>

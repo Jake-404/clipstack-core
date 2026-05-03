@@ -2,6 +2,7 @@
 // Default home for the platform. 12-column asymmetric grid; tiles will be
 // draggable in a later pass (Phase A.2). Numbers are mono with tabular-nums.
 
+import type { Metadata } from "next";
 import { AppShell } from "@/components/layout/AppShell";
 import { HeroKpiTile } from "@/components/mission-control/HeroKpiTile";
 import { ApprovalQueueTile } from "@/components/mission-control/ApprovalQueueTile";
@@ -37,6 +38,11 @@ import type {
   AgentStatus,
 } from "@/components/AgentMark";
 
+export const metadata: Metadata = {
+  title: "Mission Control · Clipstack",
+  description:
+    "Workspace overview — pending approvals, anomalies, experiments, performance.",
+};
 
 // Mission Control is a server component → it can directly call the
 // internal helpers (no need for an HTTP roundtrip back to its own
@@ -766,9 +772,13 @@ export default async function MissionControlPage() {
 
   return (
     <AppShell title="Mission Control">
-      <div className="p-6">
-        {/* Doc 8 §9.2 — bento grid. 12 cols on desktop, stacks on mobile. */}
-        <div className="grid grid-cols-12 gap-4 auto-rows-[minmax(120px,auto)]">
+      <div className="p-4 sm:p-6">
+        {/* Doc 8 §9.2 — bento grid. 12 cols on desktop, stacks on mobile.
+            On <md every Card auto-collapses to col-span-12 via the cva
+            size variants in card.tsx, so the grid linearises cleanly.
+            Tighter gap on small viewports keeps tiles compact when each
+            occupies the full row. */}
+        <div className="grid grid-cols-12 gap-3 sm:gap-4 auto-rows-[minmax(120px,auto)]">
           {/* Hero KPI: this-week avg engagement percentile + week-over-
               week delta + 12-week trend + drafts shipped this week.
               Real data: post_metrics.engagement_percentile aggregated
@@ -863,12 +873,16 @@ export default async function MissionControlPage() {
           <ExperimentsTile bandits={bandits} />
         </div>
 
-        {/* Footer rail — three-excellence reminder per Doc 7 §13. */}
-        <div className="mt-8 flex items-center gap-4 text-xs text-text-tertiary">
+        {/* Footer rail — three-excellence reminder per Doc 7 §13.
+            Wraps on narrow viewports so the kbd-shortcut tail doesn't
+            push the row into horizontal overflow. */}
+        <div className="mt-8 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-text-tertiary">
           <span className="font-mono tabular-nums">core/0.1.0</span>
-          <span>·</span>
+          <span aria-hidden>·</span>
           <span>dark · charcoal #0B0C0E · accent #3FA9A0</span>
-          <span className="ml-auto">⌘K search · ⌘J chat · J/K nav · A approve</span>
+          <span className="md:ml-auto">
+            ⌘K search · ⌘J chat · J/K nav · A approve
+          </span>
         </div>
       </div>
     </AppShell>

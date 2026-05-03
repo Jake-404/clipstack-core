@@ -18,6 +18,7 @@
 // idiom via Drizzle's sql template tag, since Drizzle has no first-class
 // window/grouping API for this shape.
 
+import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowLeft, ArrowUp, ArrowDown } from "lucide-react";
 
@@ -29,6 +30,11 @@ import { getSession } from "@/lib/api/session";
 import { withTenant } from "@/lib/db/client";
 import { postMetrics } from "@/lib/db/schema/post-metrics";
 import { asc, countDistinct, desc, gte, sql } from "drizzle-orm";
+
+export const metadata: Metadata = {
+  title: "Performance · Clipstack",
+  description: "Workspace performance over time.",
+};
 
 type Range = "7d" | "30d" | "12w";
 
@@ -378,7 +384,9 @@ interface RangePillProps {
 
 // Inline pill via Badge — variant="accent" on active, "outline" on
 // inactive. Wrapping in a Link makes the pill the same shape on hover/
-// focus as the rest of the navigation pills on /experiments.
+// focus as the rest of the navigation pills on /experiments. Each pill
+// announces its range via aria-label so screen readers don't read
+// "7d" as a meaningless token.
 function RangePill({ range, active, label }: RangePillProps) {
   const isActive = range === active;
   return (
@@ -386,6 +394,7 @@ function RangePill({ range, active, label }: RangePillProps) {
       href={`/performance?range=${range}`}
       className="inline-block focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 rounded-sm"
       aria-current={isActive ? "page" : undefined}
+      aria-label={`Set range to ${label}${isActive ? " (current)" : ""}`}
     >
       <Badge variant={isActive ? "accent" : "outline"}>{label}</Badge>
     </Link>
@@ -432,10 +441,10 @@ export default async function PerformancePage({
 
   return (
     <AppShell title="performance">
-      <div className="p-6 max-w-6xl mx-auto">
+      <div className="p-4 sm:p-6 max-w-6xl mx-auto">
         <Link
           href="/"
-          className="inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors duration-fast mb-4"
+          className="inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors duration-fast mb-4 rounded-sm focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-500"
         >
           <ArrowLeft className="h-4 w-4" aria-hidden />
           mission control
@@ -454,7 +463,11 @@ export default async function PerformancePage({
         {/* Range pills — three inline links above the KPI grid. The active
             pill takes accent tone; inactive read as outline. ?range= drives
             the whole page on the next request (server component). */}
-        <div className="flex items-center gap-2 mb-6">
+        <div
+          className="flex items-center gap-2 mb-6"
+          role="group"
+          aria-label="Performance time range"
+        >
           <span className="text-xs uppercase tracking-wider text-text-tertiary mr-1">
             range
           </span>
@@ -680,11 +693,11 @@ export default async function PerformancePage({
 
         {/* Footer rail — surface the active range + provenance + freshness
             so the operator can tell the page apart from a stale tab. */}
-        <div className="mt-8 flex items-center gap-4 text-xs text-text-tertiary">
+        <div className="mt-8 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-text-tertiary">
           <span className="font-mono tabular-nums">range: {range}</span>
-          <span>·</span>
+          <span aria-hidden>·</span>
           <span>post_metrics aggregations</span>
-          <span className="ml-auto">live · &lt;60s lag</span>
+          <span className="md:ml-auto">live · &lt;60s lag</span>
         </div>
       </div>
     </AppShell>

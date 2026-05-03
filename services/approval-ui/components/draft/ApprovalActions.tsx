@@ -175,12 +175,19 @@ export function ApprovalActions({ approvalId, draftId: _draftId }: ApprovalActio
   if (mode.kind === "denying") {
     return (
       <form onSubmit={handleDenySubmit} className="flex flex-col gap-3">
-        <div className="text-xs text-text-tertiary leading-relaxed">
+        <div
+          id="deny-rationale-help"
+          className="text-xs text-text-tertiary leading-relaxed"
+        >
           Per Doc 5 — every deny captures a lesson the team can recall
           later. Rationale ≥ 20 chars; choose a scope so the right
           future drafts pick it up.
         </div>
+        <label htmlFor="deny-rationale" className="sr-only">
+          Denial rationale
+        </label>
         <textarea
+          id="deny-rationale"
           value={mode.rationale}
           onChange={(e) =>
             setMode({ ...mode, rationale: e.target.value, error: null })
@@ -191,10 +198,11 @@ export function ApprovalActions({ approvalId, draftId: _draftId }: ApprovalActio
           maxLength={2000}
           required
           disabled={isPending}
+          aria-describedby="deny-rationale-help"
           className="w-full rounded border border-border-default bg-bg-base px-3 py-2 text-sm text-text-primary placeholder:text-text-tertiary focus:border-accent-500 focus:outline-none focus:ring-1 focus:ring-accent-500 disabled:opacity-50"
         />
         <fieldset className="flex flex-col gap-1.5">
-          <legend className="text-xs text-text-tertiary mb-1">scope</legend>
+          <legend className="text-xs text-text-tertiary mb-1">Scope</legend>
           {(Object.keys(SCOPE_LABEL) as DenyScope[]).map((scope) => (
             <label
               key={scope}
@@ -217,13 +225,15 @@ export function ApprovalActions({ approvalId, draftId: _draftId }: ApprovalActio
           ))}
         </fieldset>
         {mode.error && (
-          <div className="text-xs text-status-danger">{mode.error}</div>
+          <div role="alert" className="text-xs text-status-danger">
+            {mode.error}
+          </div>
         )}
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="submit"
             disabled={isPending || mode.rationale.trim().length < 20}
-            className="px-3 py-1.5 rounded bg-status-danger text-text-inverted text-sm font-medium hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity duration-fast"
+            className="px-3 py-1.5 rounded bg-status-danger text-text-inverted text-sm font-medium hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity duration-fast focus:outline-none focus-visible:ring-2 focus-visible:ring-status-danger focus-visible:ring-offset-2 focus-visible:ring-offset-bg-surface"
           >
             {isPending ? "denying…" : "deny + capture lesson"}
           </button>
@@ -231,11 +241,11 @@ export function ApprovalActions({ approvalId, draftId: _draftId }: ApprovalActio
             type="button"
             disabled={isPending}
             onClick={() => setMode({ kind: "idle" })}
-            className="px-3 py-1.5 rounded border border-border-default text-sm text-text-secondary hover:bg-bg-elevated transition-colors duration-fast"
+            className="px-3 py-1.5 rounded border border-border-default text-sm text-text-secondary hover:bg-bg-elevated transition-colors duration-fast focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-500"
           >
             cancel
           </button>
-          <span className="ml-auto text-xs text-text-tertiary font-mono tabular-nums">
+          <span className="ml-auto text-xs text-text-tertiary font-mono tabular-nums" aria-live="polite">
             {mode.rationale.trim().length}/20
           </span>
         </div>
@@ -250,7 +260,7 @@ export function ApprovalActions({ approvalId, draftId: _draftId }: ApprovalActio
         type="button"
         onClick={handleApprove}
         disabled={isPending}
-        className="px-3 py-1.5 rounded bg-accent-500 text-text-inverted text-sm font-medium hover:opacity-90 disabled:opacity-40 transition-opacity duration-fast"
+        className="px-3 py-1.5 rounded bg-accent-500 text-text-inverted text-sm font-medium hover:opacity-90 disabled:opacity-40 transition-opacity duration-fast focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 focus-visible:ring-offset-2 focus-visible:ring-offset-bg-surface"
       >
         {isPending ? "approving…" : "approve"}
       </button>
@@ -265,7 +275,7 @@ export function ApprovalActions({ approvalId, draftId: _draftId }: ApprovalActio
           })
         }
         disabled={isPending}
-        className="px-3 py-1.5 rounded border border-border-default text-sm text-text-secondary hover:bg-bg-elevated transition-colors duration-fast disabled:opacity-40"
+        className="px-3 py-1.5 rounded border border-border-default text-sm text-text-secondary hover:bg-bg-elevated transition-colors duration-fast disabled:opacity-40 focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-500"
       >
         deny
       </button>

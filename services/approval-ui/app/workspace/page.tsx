@@ -3,19 +3,25 @@
 // The shell mirrors /experiments and /drafts so the navigation feels
 // consistent rather than half-built.
 
+import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 
 import { AppShell } from "@/components/layout/AppShell";
 import { Card } from "@/components/ui/card";
 
+export const metadata: Metadata = {
+  title: "Workspace · Clipstack",
+  description: "Coming next.",
+};
+
 export default async function WorkspacePage() {
   return (
     <AppShell title="workspace">
-      <div className="p-6 max-w-5xl mx-auto">
+      <div className="p-4 sm:p-6 max-w-5xl mx-auto">
         <Link
           href="/"
-          className="inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors duration-fast mb-4"
+          className="inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors duration-fast mb-4 rounded-sm focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-500"
         >
           <ArrowLeft className="h-4 w-4" aria-hidden />
           mission control
@@ -51,11 +57,11 @@ export default async function WorkspacePage() {
           </p>
         </Card>
 
-        <div className="mt-8 flex items-center gap-4 text-xs text-text-tertiary">
+        <div className="mt-8 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-text-tertiary">
           <span className="font-mono tabular-nums">workspace</span>
-          <span>·</span>
+          <span aria-hidden>·</span>
           <span>brand kit · in design</span>
-          <span className="ml-auto">build your dream</span>
+          <span className="md:ml-auto">build your dream</span>
         </div>
       </div>
     </AppShell>

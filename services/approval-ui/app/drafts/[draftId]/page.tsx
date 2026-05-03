@@ -9,6 +9,7 @@
 // notes land in follow-up slices; the page renders cleanly without
 // them and the URL space is bookmarkable today.
 
+import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { notFound } from "next/navigation";
@@ -164,6 +165,31 @@ interface PageProps {
   params: Promise<{ draftId: string }>;
 }
 
+// Pull the draft title for the page title — fail-soft to a generic
+// title on any fetch failure so a missing draft / DB hiccup can't
+// crash the metadata path. Page render handles notFound separately.
+export async function generateMetadata({
+  params,
+}: PageProps): Promise<Metadata> {
+  try {
+    const { draftId } = await params;
+    const result = await fetchDraft(draftId);
+    const title = result?.draft.title?.trim();
+    if (title) {
+      return {
+        title: `${title} · Draft · Clipstack`,
+        description: `Draft detail — body, status, recent metric snapshots.`,
+      };
+    }
+  } catch {
+    /* fall through to generic */
+  }
+  return {
+    title: "Draft · Clipstack",
+    description: "Draft detail — body, status, recent metric snapshots.",
+  };
+}
+
 export default async function DraftDetailPage({ params }: PageProps) {
   const { draftId } = await params;
   const result = await fetchDraft(draftId);
@@ -174,10 +200,10 @@ export default async function DraftDetailPage({ params }: PageProps) {
 
   return (
     <AppShell title={`draft / ${draft.title ?? "(untitled)"}`}>
-      <div className="p-6 max-w-5xl mx-auto">
+      <div className="p-4 sm:p-6 max-w-5xl mx-auto">
         <Link
           href="/"
-          className="inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors duration-fast mb-4"
+          className="inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors duration-fast mb-4 rounded-sm focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-500"
         >
           <ArrowLeft className="h-4 w-4" aria-hidden />
           mission control
@@ -250,7 +276,8 @@ export default async function DraftDetailPage({ params }: PageProps) {
                   href={draft.publishedUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-xs text-text-secondary hover:text-text-primary"
+                  className="text-xs text-text-secondary hover:text-text-primary rounded-sm focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-500"
+                  aria-label="Open published version in a new tab"
                 >
                   open published →
                 </a>
@@ -272,9 +299,10 @@ export default async function DraftDetailPage({ params }: PageProps) {
               </span>
             </CardHeader>
             {metrics.length === 0 ? (
-              <p className="text-sm text-text-tertiary">
-                No metric snapshots yet. /ingest writes here once the
-                draft is published and pollers start observing.
+              <p className="text-sm text-text-tertiary leading-relaxed">
+                No metric snapshots yet — <span className="font-mono">/ingest</span>{" "}
+                writes here once the draft is published and the platform
+                pollers start observing.
               </p>
             ) : (
               <div className="space-y-1.5 text-xs font-mono tabular-nums">
@@ -378,9 +406,9 @@ export default async function DraftDetailPage({ params }: PageProps) {
           </div>
         )}
 
-        <div className="mt-8 flex items-center gap-4 text-xs text-text-tertiary">
-          <span className="font-mono tabular-nums">{draft.id}</span>
-          <span className="ml-auto">live · &lt;15s lag</span>
+        <div className="mt-8 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-text-tertiary">
+          <span className="font-mono tabular-nums break-all">{draft.id}</span>
+          <span className="md:ml-auto">live · &lt;15s lag</span>
         </div>
       </div>
     </AppShell>

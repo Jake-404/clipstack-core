@@ -40,7 +40,15 @@ export function HeroKpiTile({ predicted, delta, trend, weeklyShipped }: HeroKpiT
         </span>
       </div>
 
-      <Sparkline values={trend} width={320} height={48} />
+      <Sparkline
+        values={trend}
+        width={320}
+        height={48}
+        // Cap to the card's content width on narrow viewports so the
+        // 320×48 SVG can't overflow the 12-col stacked layout. SVG
+        // preserves its viewBox so the chart scales proportionally.
+        className="w-full max-w-[320px] h-auto"
+      />
 
       <div className="mt-auto pt-4 flex items-center gap-4 text-xs text-text-secondary">
         <span>

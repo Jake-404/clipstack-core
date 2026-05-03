@@ -6,6 +6,7 @@
 // component renders the universal list view first — the swipe layer
 // is its own slice and lives on top of the same data contract.
 
+import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { asc, eq, inArray } from "drizzle-orm";
@@ -22,6 +23,11 @@ import { getSession } from "@/lib/api/session";
 import { withTenant } from "@/lib/db/client";
 import { agents as agentsTable } from "@/lib/db/schema/agents";
 import { drafts } from "@/lib/db/schema/drafts";
+
+export const metadata: Metadata = {
+  title: "Inbox · Clipstack",
+  description: "Drafts awaiting your decision.",
+};
 
 // Agent role → AgentMark visual mapping. Doc 8 §5.6 — every role
 // has a stable (shape, color) so the same agent reads the same way
@@ -148,19 +154,22 @@ export default async function InboxPage() {
 
   return (
     <AppShell title="inbox">
-      <div className="p-6 max-w-5xl mx-auto">
+      <div className="p-4 sm:p-6 max-w-5xl mx-auto">
         <Link
           href="/"
-          className="inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors duration-fast mb-4"
+          className="inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors duration-fast mb-4 rounded-sm focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-500"
         >
           <ArrowLeft className="h-4 w-4" aria-hidden />
           mission control
         </Link>
 
         <div className="mb-6">
-          <h1 className="text-2xl font-semibold text-text-primary mb-2">
+          {/* Visually a page-title; semantically an h2 because the
+              persistent TopBar already provides the canonical h1 with
+              the same text. Keeps the heading order valid. */}
+          <h2 className="text-2xl font-semibold text-text-primary mb-2">
             inbox
-          </h1>
+          </h2>
           <p className="text-sm text-text-tertiary">
             Drafts awaiting your decision. Oldest first — highest urgency
             at the top.
@@ -186,9 +195,9 @@ export default async function InboxPage() {
               return (
                 <section key={channel}>
                   <div className="flex items-baseline gap-2 mb-2 pb-1 border-b border-border-subtle">
-                    <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
+                    <h3 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
                       {channel}
-                    </h2>
+                    </h3>
                     <span className="text-xs text-text-tertiary font-mono tabular-nums">
                       {group.length}
                     </span>
@@ -215,7 +224,7 @@ export default async function InboxPage() {
                           <Link
                             href={`/drafts/${row.id}`}
                             data-keyboard-row
-                            className="flex items-center gap-3 py-3 hover:bg-bg-elevated transition-colors duration-fast -mx-2 px-2 rounded"
+                            className="flex items-center gap-3 py-3 hover:bg-bg-elevated transition-colors duration-fast -mx-2 px-2 rounded focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-500"
                           >
                             <AgentMark
                               shape={row.agentShape}
@@ -255,13 +264,13 @@ export default async function InboxPage() {
           </div>
         )}
 
-        <div className="mt-8 flex items-center gap-4 text-xs text-text-tertiary">
+        <div className="mt-8 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-text-tertiary">
           <span className="font-mono tabular-nums">
             {items.length} total
           </span>
-          <span>·</span>
+          <span aria-hidden>·</span>
           <span>approval queue</span>
-          <span className="ml-auto">live · &lt;15s lag</span>
+          <span className="md:ml-auto">live · &lt;15s lag</span>
         </div>
       </div>
     </AppShell>

@@ -8,6 +8,7 @@
 // actorKind. The 'system' actor has no row to join, so its display falls
 // back to the literal "system" string in the row renderer.
 
+import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { and, desc, eq, sql } from "drizzle-orm";
@@ -20,6 +21,12 @@ import { withTenant } from "@/lib/db/client";
 import { auditLog } from "@/lib/db/schema/audit";
 import { agents } from "@/lib/db/schema/agents";
 import { users } from "@/lib/db/schema/users";
+
+export const metadata: Metadata = {
+  title: "Activity · Clipstack",
+  description:
+    "Workspace audit log — every action your team and agents have taken.",
+};
 
 const ROW_LIMIT = 100;
 
@@ -275,19 +282,21 @@ export default async function ActivityPage() {
 
   return (
     <AppShell title="activity">
-      <div className="p-6 max-w-5xl mx-auto">
+      <div className="p-4 sm:p-6 max-w-5xl mx-auto">
         <Link
           href="/"
-          className="inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors duration-fast mb-4"
+          className="inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors duration-fast mb-4 rounded-sm focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-500"
         >
           <ArrowLeft className="h-4 w-4" aria-hidden />
           mission control
         </Link>
 
         <div className="mb-6">
-          <h1 className="text-2xl font-semibold text-text-primary mb-2">
+          {/* Visually a page-title; semantically an h2 because the
+              persistent TopBar already provides the canonical h1. */}
+          <h2 className="text-2xl font-semibold text-text-primary mb-2">
             activity
-          </h1>
+          </h2>
           <p className="text-sm text-text-tertiary">
             Every action your team and agents have taken. Newest first.
           </p>
@@ -305,9 +314,9 @@ export default async function ActivityPage() {
             {groups.map((group) => (
               <section key={group.date}>
                 <div className="flex items-baseline gap-2 mb-2 pb-1 border-b border-border-subtle">
-                  <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide font-mono tabular-nums">
+                  <h3 className="text-sm font-semibold text-text-secondary uppercase tracking-wide font-mono tabular-nums">
                     {group.date}
-                  </h2>
+                  </h3>
                   <span className="text-xs text-text-tertiary font-mono tabular-nums">
                     {group.rows.length} events
                   </span>
@@ -318,7 +327,10 @@ export default async function ActivityPage() {
                     return (
                       <li
                         key={row.id}
-                        className="flex items-start gap-3 py-3"
+                        // Wraps on small viewports so the row never
+                        // pushes the page into horizontal overflow; on
+                        // md+ the metadata columns align as one row.
+                        className="flex flex-wrap items-start gap-x-3 gap-y-1 py-3"
                       >
                         <span className="text-xs text-text-tertiary font-mono tabular-nums shrink-0 w-12 pt-0.5">
                           {formatHHMM(row.occurredAt)}
@@ -339,7 +351,7 @@ export default async function ActivityPage() {
                           {row.kind}
                         </Badge>
                         {details && (
-                          <span className="text-xs text-text-tertiary font-mono truncate min-w-0 flex-1 pt-1">
+                          <span className="text-xs text-text-tertiary font-mono truncate min-w-0 flex-1 pt-1 basis-full md:basis-auto">
                             {details}
                           </span>
                         )}
@@ -352,13 +364,13 @@ export default async function ActivityPage() {
           </div>
         )}
 
-        <div className="mt-8 flex items-center gap-4 text-xs text-text-tertiary">
+        <div className="mt-8 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-text-tertiary">
           <span className="font-mono tabular-nums">
             showing {rows.length} of last {ROW_LIMIT}
           </span>
-          <span>·</span>
+          <span aria-hidden>·</span>
           <span>audit log</span>
-          <span className="ml-auto">live · &lt;15s lag</span>
+          <span className="md:ml-auto">live · &lt;15s lag</span>
         </div>
       </div>
     </AppShell>

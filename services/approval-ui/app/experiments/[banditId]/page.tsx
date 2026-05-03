@@ -15,6 +15,7 @@
 // ly what the math is doing — α/β + posterior mean + pruned flag tell
 // the full story.
 
+import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { notFound } from "next/navigation";
@@ -108,6 +109,32 @@ interface PageProps {
   params: Promise<{ banditId: string }>;
 }
 
+// Pull the bandit's message_pillar for the page title — fail-soft to a
+// generic title on any fetch failure so a missing service or a stale
+// link can't crash the metadata path. Page render is independent of
+// this; it has its own notFound branch.
+export async function generateMetadata({
+  params,
+}: PageProps): Promise<Metadata> {
+  try {
+    const { banditId } = await params;
+    const state = await fetchBanditState(banditId);
+    const pillar = state?.message_pillar?.trim();
+    if (pillar) {
+      return {
+        title: `${pillar} · Experiment · Clipstack`,
+        description: `Bandit experiment for the ${pillar} message pillar.`,
+      };
+    }
+  } catch {
+    /* fall through to generic */
+  }
+  return {
+    title: "Experiment · Clipstack",
+    description: "Bandit experiment detail.",
+  };
+}
+
 export default async function BanditDetailPage({ params }: PageProps) {
   const { banditId } = await params;
   const state = await fetchBanditState(banditId);
@@ -125,11 +152,11 @@ export default async function BanditDetailPage({ params }: PageProps) {
 
   return (
     <AppShell title={`experiment / ${state.message_pillar || "(no pillar)"}`}>
-      <div className="p-6 max-w-5xl mx-auto">
+      <div className="p-4 sm:p-6 max-w-5xl mx-auto">
         {/* Breadcrumb back to Mission Control */}
         <Link
           href="/"
-          className="inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors duration-fast mb-4"
+          className="inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary transition-colors duration-fast mb-4 rounded-sm focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-500"
         >
           <ArrowLeft className="h-4 w-4" aria-hidden />
           mission control
@@ -281,11 +308,13 @@ export default async function BanditDetailPage({ params }: PageProps) {
         )}
 
         {/* Footer rail — same idiom as Mission Control */}
-        <div className="mt-8 flex items-center gap-4 text-xs text-text-tertiary">
-          <span className="font-mono tabular-nums">{state.bandit_id}</span>
-          <span>·</span>
+        <div className="mt-8 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-text-tertiary">
+          <span className="font-mono tabular-nums break-all">
+            {state.bandit_id}
+          </span>
+          <span aria-hidden>·</span>
           <span>thompson sampling · doc 4 §2.3</span>
-          <span className="ml-auto">live · &lt;15s lag</span>
+          <span className="md:ml-auto">live · &lt;15s lag</span>
         </div>
       </div>
     </AppShell>
