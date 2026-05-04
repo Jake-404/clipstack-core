@@ -96,7 +96,8 @@ const fetchBanditState = cache(async function fetchBanditState(
     // bandit that doesn't belong to the active workspace.
     if (state.company_id !== companyId) return null;
     return state;
-  } catch {
+  } catch (err) {
+    console.error("[experiments-detail] fetchBanditState failed", { banditId, err });
     return null;
   }
 });

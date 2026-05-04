@@ -273,9 +273,11 @@ async function fetchAggregates(range: Range): Promise<Aggregates> {
       platforms,
       weekly,
     };
-  } catch {
+  } catch (err) {
     // Fail-soft: a bad query shouldn't 500 the page — render the
-    // empty state instead so the operator still sees the layout.
+    // empty state instead so the operator still sees the layout. Cause
+    // hits logs so a regression in the SQL aggregation isn't invisible.
+    console.error("[performance] fetchAggregates failed", { range, err });
     return EMPTY_AGGREGATES;
   }
 }

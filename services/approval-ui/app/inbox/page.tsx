@@ -116,7 +116,8 @@ async function fetchInbox(): Promise<InboxRow[]> {
         };
       });
     });
-  } catch {
+  } catch (err) {
+    console.error("[inbox] fetchInbox failed", err);
     return [];
   }
 }

@@ -96,10 +96,17 @@ export const GET = withApi(async (req: NextRequest, ctx: RouteContext) => {
       },
       signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
     });
-  } catch {
+  } catch (err) {
     // Fail-soft on outage — empty list rather than 502 so the UI tile
     // can render "no experiments yet" gracefully. The /producer/status
-    // tile is the right place to surface backend-down state.
+    // tile is the right place to surface backend-down state. Cause is
+    // logged so a wedged orchestrator doesn't hide as a quietly empty
+    // tile (the silent-catch class fixed in this sweep).
+    console.error("[api/experiments] orchestrator unreachable", {
+      companyId,
+      orchUrl,
+      err,
+    });
     return ok({ companyId, bandits: [] });
   }
 

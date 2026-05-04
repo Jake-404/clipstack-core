@@ -112,7 +112,15 @@ export const GET = withApi(async (req: NextRequest, ctx: RouteContext) => {
       }),
       signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
     });
-  } catch {
+  } catch (err) {
+    // Same observability pattern as /api/companies/:cid/experiments —
+    // surface the cause to logs so a wedged backend doesn't hide as a
+    // quietly empty Anomalies tile.
+    console.error("[api/anomalies] performance-ingest unreachable", {
+      companyId,
+      ingestUrl,
+      err,
+    });
     return ok({
       companyId,
       lookbackHours,

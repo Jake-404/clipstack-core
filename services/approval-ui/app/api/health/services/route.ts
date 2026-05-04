@@ -178,7 +178,11 @@ async function probeProducerStatus(baseUrl: string): Promise<ServiceProducerStat
       emitCount: asNumber(payload.emit_count),
       emitErrors: asNumber(payload.emit_errors),
     };
-  } catch {
+  } catch (err) {
+    // Probe failures are operationally interesting — log so the health
+    // route's "the producer probe failed" outcome is debuggable without
+    // having to add a logger from scratch on the next regression.
+    console.error("[health/services] probeProducerStatus failed", { baseUrl, err });
     return null;
   }
 }
@@ -197,7 +201,8 @@ async function probeConsumerStatus(baseUrl: string): Promise<ServiceConsumerStat
       matchedCount: asNumber(payload.matched_count),
       handleErrors: asNumber(payload.handle_errors),
     };
-  } catch {
+  } catch (err) {
+    console.error("[health/services] probeConsumerStatus failed", { baseUrl, err });
     return null;
   }
 }

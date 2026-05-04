@@ -106,10 +106,12 @@ async function fetchActivity(): Promise<ActivityRow[]> {
       userEmail: r.userEmail,
       agentDisplayName: r.agentDisplayName,
     }));
-  } catch {
+  } catch (err) {
     // Fail-soft: an audit-log read failure shouldn't 500 the page. The
-    // empty state reads as "no activity yet" — a logged warning would be
-    // ideal once the service has a structured logger wired in.
+    // empty state reads as "no activity yet". Surface the cause to logs
+    // so a regression in the LEFT JOIN cast (the 35e1a87 regression
+    // shape) doesn't hide as a quietly empty page.
+    console.error("[activity] fetchActivity failed", err);
     return [];
   }
 }

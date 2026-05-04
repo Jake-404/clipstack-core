@@ -149,7 +149,8 @@ const fetchDraft = cache(async function fetchDraft(
     });
 
     return result;
-  } catch {
+  } catch (err) {
+    console.error("[draft-detail] fetchDraft failed", { draftId, err });
     return null;
   }
 });

@@ -53,7 +53,8 @@ async function fetchAllBandits(): Promise<BanditSummary[]> {
     if (!resp.ok) return [];
     const payload = (await resp.json()) as { bandits?: BanditSummary[] };
     return payload.bandits ?? [];
-  } catch {
+  } catch (err) {
+    console.error("[experiments] fetchBandits failed", err);
     return [];
   }
 }

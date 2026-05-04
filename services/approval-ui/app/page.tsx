@@ -85,7 +85,12 @@ async function fetchBandits(): Promise<BanditSummary[]> {
     if (!resp.ok) return [];
     const payload = (await resp.json()) as { bandits?: BanditSummary[] };
     return payload.bandits ?? [];
-  } catch {
+  } catch (err) {
+    // Mission Control fails-soft to an empty experiments tile when the
+    // bandit-orchestrator is unreachable, but the cause must hit logs —
+    // an unobserved silent catch is how the two prior date-binding +
+    // text↔uuid join bugs slipped past CI for weeks.
+    console.error("[mission-control] fetchBandits failed", err);
     return [];
   }
 }
@@ -197,7 +202,10 @@ async function fetchApprovalQueue(): Promise<{
     });
 
     return { items: queueItems, totalPending: Number(total ?? 0) };
-  } catch {
+  } catch (err) {
+    // Tile fails-soft to "empty queue" — the cause must hit logs so a
+    // bad join / RLS misconfig isn't invisible.
+    console.error("[mission-control] fetchApprovalQueue failed", err);
     return { items: [], totalPending: 0 };
   }
 }
@@ -272,7 +280,8 @@ async function fetchAgents(): Promise<AgentActivity[]> {
         // cleanly without them.
       };
     });
-  } catch {
+  } catch (err) {
+    console.error("[mission-control] fetchAgents failed", err);
     return [];
   }
 }
@@ -378,7 +387,8 @@ async function fetchHeroKpi(): Promise<HeroKpi> {
       trend: weekly,
       weeklyShipped: shipped,
     };
-  } catch {
+  } catch (err) {
+    console.error("[mission-control] fetchHeroKpi failed", err);
     return { predicted: 50, delta: 0, trend: [], weeklyShipped: 0 };
   }
 }
@@ -548,7 +558,8 @@ async function fetchKpiMetrics(): Promise<KpiMetrics> {
       reach7dTrend,
       spendMtdTrend,
     };
-  } catch {
+  } catch (err) {
+    console.error("[mission-control] fetchKpiMetrics failed", err);
     return {
       ctr7d: null,
       reach7d: 0,
@@ -599,9 +610,11 @@ async function fetchLessonStats(): Promise<LessonStats> {
       thisWeekCount: Number(row?.thisWeek ?? 0),
       clientScopedCount: Number(row?.clientScoped ?? 0),
     };
-  } catch {
+  } catch (err) {
     // Mission Control should never crash on a stats query — the tile's
-    // empty state is the right fallback.
+    // empty state is the right fallback. But surface the cause so silent
+    // RLS / bind / join bugs don't hide behind a clean-looking empty tile.
+    console.error("[mission-control] fetchLessonStats failed", err);
     return { totalCount: 0, thisWeekCount: 0, clientScopedCount: 0 };
   }
 }
@@ -624,7 +637,8 @@ async function fetchStatusUrl(
     });
     if (!resp.ok) return null;
     return (await resp.json()) as Record<string, unknown>;
-  } catch {
+  } catch (err) {
+    console.error("[mission-control] fetchStatusUrl failed", { url, err });
     return null;
   }
 }
@@ -748,7 +762,8 @@ async function fetchAnomalies(): Promise<AnomalyDetection[]> {
       detections?: AnomalyDetection[];
     };
     return payload.detections ?? [];
-  } catch {
+  } catch (err) {
+    console.error("[mission-control] fetchAnomalies failed", err);
     return [];
   }
 }
