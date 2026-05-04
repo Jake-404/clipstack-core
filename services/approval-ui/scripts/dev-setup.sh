@@ -92,8 +92,11 @@ else
   export PATH="$PG_BIN:$PATH"
   command -v psql >/dev/null 2>&1 || die "psql still not on PATH after brew install — try 'brew link postgresql@17'"
 
-  # Start the service if not already running.
-  if ! brew services list | grep -E '^postgresql@17\s+started' >/dev/null 2>&1; then
+  # Start the service if not already running. brew services list output
+  # uses tab- or space-separated columns depending on terminal width and
+  # version — match on the literal "started" word with an awk filter
+  # rather than a regex \s anchor that depended on grep build flags.
+  if ! brew services list | awk '$1=="postgresql@17" && $2=="started" {found=1} END {exit !found}'; then
     step "Starting postgresql@17 service"
     brew services start postgresql@17
     sleep 2

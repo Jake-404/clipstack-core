@@ -41,12 +41,24 @@ Four-layer stack:
 Plus a real-time layer:
 
 - **Redpanda** event bus (Kafka-compatible) — 9 named topics close 12 strategy-refinement loopholes
-- **mabwiser** Thompson-sampling bandits — N=3–5 variants per piece, auto-prune low performers
+- **Thompson-sampling bandits** — `bandit-orchestrator` runs N=3–5 variants per piece on Beta-prior posteriors via Python's stdlib `random.betavariate` (no `mabwiser`/`numpy` needed at K≤5); contextual-bandit upgrade gated behind the `[ml]` extra
 - **LightGBM** percentile predictor — pre-publish percentile prediction calibrated within ±15 points
 
 ## Quick start
 
 Requires Docker + Docker Compose, Node 20+, Python 3.11+, pnpm 9+.
+
+For the fastest path to a logged-in Mission Control on a fresh checkout, use the one-command setup script — it brings up Postgres, applies migrations, seeds a demo workspace, writes `.env.local` with `AUTH_STUB` bypass, and tells you what to run next:
+
+```bash
+bash services/approval-ui/scripts/dev-setup.sh
+cd services/approval-ui && pnpm dev --ignore-workspace
+# → http://localhost:3000
+```
+
+Mission Control's surface is what the seed populates: `/` (bento dashboard with 9 real-data tiles), `/inbox` (pending-approval queue), `/activity` (audit-log feed), `/performance` (KPI history with 7d/30d/12w ranges), `/experiments` + `/experiments/[id]` (bandit drill-down), `/drafts/[id]` (with approve/deny + USP 5 lesson-capture). See `UI_QUICKSTART.md` for the 5-minute walkthrough.
+
+For the full stack including agent services:
 
 ```bash
 # 1. Start the stack
@@ -68,6 +80,8 @@ cd services/agent-crewai && uv sync && uv run uvicorn main:app --reload --port 8
 cd services/agent-langgraph && uv sync && uv run uvicorn main:app --reload --port 8002
 # → http://localhost:8002/health
 ```
+
+The closed-loop bandit pipeline (`generate → publish → measure → learn`) is documented step-by-step in `docs/closed-loop.md`. The full service mesh + data plane reference is `docs/architecture.md`. Approval-ui's API surface is in `docs/api.md` + `docs/openapi.yaml`.
 
 ## Contributing
 
