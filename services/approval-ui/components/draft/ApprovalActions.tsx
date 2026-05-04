@@ -26,6 +26,13 @@ type Mode =
 
 type DenyScope = "forever" | "this_topic" | "this_client";
 
+// Bound the approve/deny round-trip so a wedged backend can't leave the
+// button spinning indefinitely. 15s covers the slowest realistic path
+// (deny + lesson capture + audit insert in one txn) with headroom; past
+// that the user is better served by an explicit timeout error than a
+// hung UI.
+const ACTION_TIMEOUT_MS = 15_000;
+
 const SCOPE_LABEL: Record<DenyScope, string> = {
   forever: "Forever — never use this approach again",
   this_topic: "This topic — applies whenever the topic recurs",
@@ -53,6 +60,7 @@ export function ApprovalActions({ approvalId, draftId: _draftId }: ApprovalActio
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({}),
+          signal: AbortSignal.timeout(ACTION_TIMEOUT_MS),
         });
         if (!resp.ok) {
           const text = await resp.text();
@@ -114,6 +122,7 @@ export function ApprovalActions({ approvalId, draftId: _draftId }: ApprovalActio
             rationale: mode.rationale,
             scope: mode.scope,
           }),
+          signal: AbortSignal.timeout(ACTION_TIMEOUT_MS),
         });
         if (!resp.ok) {
           const text = await resp.text();

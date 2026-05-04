@@ -435,7 +435,11 @@ async def score(req: ScoreRequest) -> ScoreResponse:
         )
 
     collection = _collection_name(req.company_id)
-    async with httpx.AsyncClient() as http:
+    # Default timeout matches the per-call LITELLM/QDRANT timeouts so a
+    # wedged sidecar can't tie up the FastAPI worker indefinitely. Without
+    # this, httpx.AsyncClient() defaults to 5s for connect but UNLIMITED
+    # read — a stuck Qdrant/LiteLLM hangs every /score request forever.
+    async with httpx.AsyncClient(timeout=max(LITELLM_TIMEOUT_S, QDRANT_TIMEOUT_S)) as http:
         if not await _qdrant_collection_exists(collection, http):
             # Untrained workspace — fail-soft.
             log.info(
@@ -555,7 +559,10 @@ async def train(req: TrainRequest) -> TrainResponse:
 
     collection = _collection_name(req.company_id)
 
-    async with httpx.AsyncClient() as http:
+    # Same timeout rationale as /score — without an explicit budget, a
+    # wedged Qdrant or LiteLLM sidecar would hold the /train request open
+    # indefinitely (httpx default has unlimited read timeout).
+    async with httpx.AsyncClient(timeout=max(LITELLM_TIMEOUT_S, QDRANT_TIMEOUT_S)) as http:
         if req.replace:
             await _qdrant_delete_collection(collection, http)
         if not await _qdrant_collection_exists(collection, http):

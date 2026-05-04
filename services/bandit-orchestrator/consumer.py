@@ -132,13 +132,33 @@ class RewardConsumer:
             )
             return
 
+        # Defensive deserializer: a single malformed event from the broker
+        # (truncated payload, non-utf-8 bytes, raw bytes from a non-clipstack
+        # producer that mistakenly fanned to this topic) used to crash the
+        # iterator before reaching the per-message try/except, which killed
+        # the consume loop until the next service restart. Returning None on
+        # parse failure surfaces in the handler as "skip this event" + a
+        # logged warning + no commit, so the broker keeps the offset and an
+        # operator can intervene without restarting the orchestrator.
+        def _safe_deserialize(raw: bytes) -> Any:
+            try:
+                return json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as ex:
+                log.warning(
+                    "consumer.deserialize_failed",
+                    error=str(ex),
+                    payload_size=len(raw),
+                    hint="message will be skipped without commit; investigate producer",
+                )
+                return None
+
         try:
             consumer = AIOKafkaConsumer(
                 CONSUMED_TOPIC,
                 bootstrap_servers=REDPANDA_BROKERS,
                 client_id=CONSUMER_CLIENT_ID,
                 group_id=CONSUMER_GROUP_ID,
-                value_deserializer=lambda v: json.loads(v.decode("utf-8")),
+                value_deserializer=_safe_deserialize,
                 # Resume from committed offset on restart — never replay
                 # already-rewarded events (would double-count).
                 auto_offset_reset="latest",
@@ -189,6 +209,12 @@ class RewardConsumer:
         try:
             async for msg in self._consumer:
                 self._consumed_count += 1
+                # _safe_deserialize emits None on parse failure (already
+                # logged at the deserializer site). Skip without commit so
+                # the broker retains the offset for an operator to inspect.
+                if msg.value is None:
+                    self._handle_errors += 1
+                    continue
                 try:
                     self._handler(msg.value)
                     # Commit only on success so a crash mid-handle replays
