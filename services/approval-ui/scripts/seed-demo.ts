@@ -155,6 +155,14 @@ interface DraftSpec {
   predictedPercentile: number | null;
   ageMinutes: number; // how long ago the draft was created
   hashtags: string[];
+  /**
+   * Minutes from NOW until scheduled publish. Positive = future, null =
+   * unscheduled. The /calendar surface reads this column to populate the
+   * "upcoming" lanes; without it the page renders the loose-ends rail
+   * only. Seed sets a handful of forward-dated rows so the calendar
+   * demo isn't an empty grid on a fresh tenant.
+   */
+  scheduledInMinutes?: number | null;
 }
 
 const DRAFT_SPECS: DraftSpec[] = [
@@ -286,6 +294,55 @@ const DRAFT_SPECS: DraftSpec[] = [
     predictedPercentile: 22,
     ageMinutes: 60 * 24 * 1, // 1 day ago
     hashtags: ["AI"],
+  },
+
+  // ─── 4 scheduled (future-dated) — populates /calendar's upcoming lanes ──
+  // The calendar groups by scheduledAt UTC day; we seed across the next
+  // ~10 days so the page renders a multi-day strip rather than collapsing
+  // into a single bucket.
+  {
+    channel: "linkedin",
+    status: "scheduled",
+    title: "Three editorial primitives every AI marketing tool will steal",
+    body:
+      "After eighteen months of building Clipstack, three primitives keep showing up at every workspace that gets institutional voice right. Lesson capture with structured rationale + scope. Workspace-relative percentile prediction (not industry benchmark). Per-workspace voice corpus that doesn't degrade when you add a new client. The labs will catch up. The team that owns the lesson trail wins anyway.",
+    predictedPercentile: 73,
+    ageMinutes: 60 * 6, // created 6h ago
+    scheduledInMinutes: 60 * 22, // ships in ~22h (tomorrow morning)
+    hashtags: ["AI", "editorial", "marketing"],
+  },
+  {
+    channel: "x",
+    status: "scheduled",
+    title: null,
+    body:
+      "The cheapest moat in software right now is institutional memory. Every team is one departure away from forgetting why the second sentence on its homepage matters. Codify the lessons and the moat survives the org chart.",
+    predictedPercentile: 65,
+    ageMinutes: 60 * 8,
+    scheduledInMinutes: 60 * 24 * 2, // ships in 2 days
+    hashtags: ["startups"],
+  },
+  {
+    channel: "newsletter",
+    status: "scheduled",
+    title: "Calendar v1: every channel, every client, one source of truth",
+    body:
+      "This week's calendar surface lands. Approved drafts flow onto a slot; channel adapters pull from the same plan; conflicts surface before they ship rather than after. Drag-to-reschedule + bulk move come in the follow-up slice once the conflict detector ships. The thing that makes this feel different from every other content calendar — every row is a draft the predictor has already scored, so the calendar isn't a wishlist, it's a portfolio.",
+    predictedPercentile: 70,
+    ageMinutes: 60 * 12,
+    scheduledInMinutes: 60 * 24 * 5, // ships in 5 days
+    hashtags: ["product", "calendar"],
+  },
+  {
+    channel: "blog",
+    status: "scheduled",
+    title: "What the closed-loop pipeline taught us in its first 30 days",
+    body:
+      "Thirty days of generate → publish → measure → learn at our first design partner. The loop's first observation: the percentile predictor's calibration band tightened from ±18 to ±11 inside two weeks of training on workspace-specific post_metrics. The second: the bandit's exploration rate dropped from 35% to 18% as Beta posteriors stabilized — meaning the system stopped second-guessing variants the workspace had already validated. The third: lessons captured per week settled at 4-7, which compounds into the strategist's brief generation through the cosine recall path.",
+    predictedPercentile: 76,
+    ageMinutes: 60 * 24,
+    scheduledInMinutes: 60 * 24 * 9, // ships in 9 days
+    hashtags: ["product", "ml", "case-study"],
   },
 ];
 
@@ -539,6 +596,13 @@ async function main(): Promise<void> {
     const draftValues: NewDraft[] = DRAFT_SPECS.map((spec, i) => {
       const created = minutesAgo(spec.ageMinutes);
       const authorId = writerAgentIds[i % writerAgentIds.length];
+      // scheduledInMinutes is forward-dated (positive = future). Convert
+      // to a Date by adding to now() rather than the inverse-of-minutesAgo
+      // path (which is for past-dated rows like createdAt/publishedAt).
+      const scheduledAt =
+        typeof spec.scheduledInMinutes === "number"
+          ? new Date(Date.now() + spec.scheduledInMinutes * 60 * 1000)
+          : null;
       return {
         id: draftIds[i],
         companyId: DEMO_COMPANY_ID,
@@ -558,6 +622,7 @@ async function main(): Promise<void> {
           spec.status === "published"
             ? `https://demo.clipstack.app/p/${i}-${spec.channel}`
             : null,
+        scheduledAt,
       };
     });
     await tx.insert(drafts).values(draftValues).onConflictDoNothing();
