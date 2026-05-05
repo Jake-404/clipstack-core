@@ -14,7 +14,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowLeft, FilmIcon } from "lucide-react";
-import { and, desc, eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { headers } from "next/headers";
 
 import { AppShell } from "@/components/layout/AppShell";
@@ -24,10 +24,11 @@ import { RenderForm } from "@/components/studio/RenderForm";
 import { getSession } from "@/lib/api/session";
 import { withTenant } from "@/lib/db/client";
 import { artifacts } from "@/lib/db/schema/artifacts";
+import { describeAdapters } from "@/lib/asset-adapters/registry";
 
 export const metadata: Metadata = {
   title: "Studio · Clipstack",
-  description: "Generate video, image, and audio assets — HTML→MP4 today, fal / Runway / Luma / Higgsfield landing in Phase B.",
+  description: "Generate video, image, audio — Satori, Motion, Hyperframes (free) + Higgsfield, Runway, Luma, ElevenLabs, Suno (metered).",
 };
 
 interface JobRow {
@@ -37,6 +38,7 @@ interface JobRow {
   status: string;
   source: string;
   mediaUrl: string | null;
+  mediaMimeType: string | null;
   errorMessage: string | null;
   providerMeta: Record<string, unknown>;
   createdAt: Date;
@@ -63,13 +65,14 @@ async function fetchJobs(companyId: string): Promise<JobRow[]> {
           status: artifacts.status,
           source: artifacts.source,
           mediaUrl: artifacts.mediaUrl,
+          mediaMimeType: artifacts.mediaMimeType,
           errorMessage: artifacts.errorMessage,
           providerMeta: artifacts.providerMeta,
           createdAt: artifacts.createdAt,
           costUsd: artifacts.costUsd,
         })
         .from(artifacts)
-        .where(and(eq(artifacts.companyId, companyId), eq(artifacts.source, "hyperframes")))
+        .where(eq(artifacts.companyId, companyId))
         .orderBy(desc(artifacts.createdAt))
         .limit(50);
       return rows.map((r) => ({
@@ -131,6 +134,9 @@ export default async function StudioPage() {
     companyId ? fetchJobs(companyId) : Promise.resolve([] as JobRow[]),
     fetchRuntime(),
   ]);
+
+  // Pure synchronous read of the registry — no I/O, no DB hit.
+  const adapterCatalogue = describeAdapters();
 
   const counts = {
     total: jobs.length,
@@ -273,33 +279,46 @@ export default async function StudioPage() {
             <Card size="small" tone="default" className="flex flex-col">
               <CardHeader>
                 <CardLabel>cost policy</CardLabel>
+                <span className="text-[10px] text-text-tertiary font-mono">
+                  {adapterCatalogue.length} adapters
+                </span>
               </CardHeader>
-              <ul className="space-y-1 text-xs text-text-secondary">
-                <li className="flex items-baseline justify-between gap-2">
-                  <span className="text-text-primary">Hyperframes</span>
-                  <Badge variant="success" className="text-[10px]">FREE</Badge>
-                </li>
-                <li className="flex items-baseline justify-between gap-2 opacity-60">
-                  <span>fal Seedance</span>
-                  <Badge variant="warning" className="text-[10px]">METERED</Badge>
-                </li>
-                <li className="flex items-baseline justify-between gap-2 opacity-60">
-                  <span>Runway Gen-3</span>
-                  <Badge variant="warning" className="text-[10px]">METERED</Badge>
-                </li>
-                <li className="flex items-baseline justify-between gap-2 opacity-60">
-                  <span>Luma Dream Machine</span>
-                  <Badge variant="warning" className="text-[10px]">METERED</Badge>
-                </li>
-                <li className="flex items-baseline justify-between gap-2 opacity-60">
-                  <span>Higgsfield Mix</span>
-                  <Badge variant="warning" className="text-[10px]">METERED</Badge>
-                </li>
+              <ul className="space-y-1.5 text-xs text-text-secondary">
+                {adapterCatalogue.map((a) => (
+                  <li
+                    key={a.type}
+                    className={`flex items-baseline justify-between gap-2 ${
+                      a.costClass === "free" ? "" : !a.apiKeyConfigured ? "opacity-60" : ""
+                    }`}
+                  >
+                    <div className="flex flex-col min-w-0 flex-1">
+                      <span className="text-text-primary truncate">
+                        {a.providerName}
+                      </span>
+                      <span className="text-[10px] font-mono tabular-nums text-text-tertiary">
+                        {a.kinds.join("/")} ·{" "}
+                        {a.approxCostUsd === 0
+                          ? "$0"
+                          : `~$${a.approxCostUsd.toFixed(2)}`}
+                        {!a.apiKeyConfigured && a.costClass !== "free" ? " · key not set" : ""}
+                      </span>
+                    </div>
+                    <Badge
+                      variant={a.costClass === "free" ? "success" : "warning"}
+                      className="text-[10px] shrink-0"
+                    >
+                      {a.costClass.toUpperCase()}
+                    </Badge>
+                  </li>
+                ))}
               </ul>
-              <p className="mt-2 text-[11px] text-text-tertiary leading-relaxed">
-                FREE adapters run autonomously; METERED adapters need
-                approval per call (Phase B + per-agent budget gate).
-                Free composer paths preferred when the brief allows.
+              <p className="mt-3 text-[11px] text-text-tertiary leading-relaxed">
+                FREE adapters run autonomously (cost-policy reflex: prefer
+                free composer paths). METERED need user approval per call
+                — agent-triggered metered calls land in the approval queue
+                rather than firing directly. Adapters without a configured
+                API key fall through to a placeholder so the cost-policy
+                router can route to them during dev/demo.
               </p>
             </Card>
           </div>
@@ -311,7 +330,7 @@ export default async function StudioPage() {
                 recent renders
               </h2>
               <span className="text-xs text-text-tertiary">
-                Hyperframes only · all sources land here when Phase B ships
+                all sources · grouped under their adapter badge
               </span>
             </div>
 
@@ -382,13 +401,44 @@ export default async function StudioPage() {
 
                       {job.status === "complete" && job.mediaUrl && (
                         <div className="rounded border border-border-subtle overflow-hidden bg-black mt-2">
-                          <video
-                            src={job.mediaUrl}
-                            controls
-                            playsInline
-                            preload="metadata"
-                            className="w-full h-auto max-h-[480px] block"
-                          />
+                          {(job.mediaMimeType?.startsWith("video") ?? false) && (
+                            <video
+                              src={job.mediaUrl}
+                              controls
+                              playsInline
+                              preload="metadata"
+                              className="w-full h-auto max-h-[480px] block"
+                            />
+                          )}
+                          {(job.mediaMimeType?.startsWith("image") ?? false) && (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img
+                              src={job.mediaUrl}
+                              alt={job.title ?? job.prompt.slice(0, 100)}
+                              className="w-full h-auto max-h-[480px] block object-contain bg-bg-elevated"
+                            />
+                          )}
+                          {(job.mediaMimeType?.startsWith("audio") ?? false) && (
+                            <div className="p-3 bg-bg-elevated">
+                              <audio
+                                src={job.mediaUrl}
+                                controls
+                                preload="metadata"
+                                className="w-full"
+                              />
+                            </div>
+                          )}
+                          {!job.mediaMimeType && (
+                            // Fallback for legacy artifacts that pre-date
+                            // mediaMimeType — assume video (Hyperframes pattern).
+                            <video
+                              src={job.mediaUrl}
+                              controls
+                              playsInline
+                              preload="metadata"
+                              className="w-full h-auto max-h-[480px] block"
+                            />
+                          )}
                         </div>
                       )}
 
@@ -402,7 +452,7 @@ export default async function StudioPage() {
                         <p className="mt-2 text-[11px] text-text-tertiary leading-relaxed">
                           {job.status === "queued"
                             ? "Queued — render starts in a few seconds."
-                            : "Rendering — typical Hyperframes render is 30-90s. Page auto-refreshes when complete."}
+                            : `Rendering — typical ${job.source} render is 30-90s. Page auto-refreshes when complete.`}
                         </p>
                       )}
                     </li>

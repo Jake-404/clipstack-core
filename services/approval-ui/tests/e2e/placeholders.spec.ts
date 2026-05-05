@@ -92,7 +92,7 @@ test("DemoBadge surfaces 'DEMO DATA · seeded workspace' on Mission Control", as
   await expect(page.getByText(/seeded workspace/i)).toBeVisible();
 });
 
-test("/studio renders Hyperframes job list + render form + runtime probe", async ({
+test("/studio renders adapter catalogue + jobs across all sources", async ({
   page,
 }) => {
   await page.goto("/studio");
@@ -104,11 +104,15 @@ test("/studio renders Hyperframes job list + render form + runtime probe", async
   // Runtime probe panel anchors with "runtime" CardLabel + reports node version.
   await expect(page.getByText("runtime", { exact: true }).first()).toBeVisible();
   await expect(page.getByText(/node v\d/i).first()).toBeVisible();
-  // Cost-policy table — Hyperframes is the only FREE row at v1.
-  await expect(page.getByText("Hyperframes", { exact: true }).first()).toBeVisible();
+  // Cost-policy table now reads from describeAdapters() — every wired
+  // adapter surfaces by its providerName. Sentinel checks for the
+  // FREE row anchor (Satori is alphabetically first FREE) + the
+  // METERED row anchor (Higgsfield as the "key unlock" provider).
+  await expect(page.getByText(/Clipstack Satori/i).first()).toBeVisible();
+  await expect(page.getByText(/Higgsfield Mix/i).first()).toBeVisible();
   await expect(page.getByText("FREE", { exact: true }).first()).toBeVisible();
-  // Seeded jobs render: 1 complete + 1 rendering + 1 failed.
-  // The "complete" status appears in a Badge plus elsewhere; we just
-  // verify "complete" is on the page (sentinel for the seeded data path).
+  await expect(page.getByText("METERED", { exact: true }).first()).toBeVisible();
+  // Seeded jobs render across multiple sources — sentinel: the 47% YoY
+  // headline is the title of the first Hyperframes complete artifact.
   await expect(page.getByText(/47% YoY/i)).toBeVisible();
 });

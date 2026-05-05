@@ -853,16 +853,19 @@ async function main(): Promise<void> {
     }
     await tx.insert(meterEvents).values(meterValues).onConflictDoNothing();
 
-    // ─── Studio artifacts (Hyperframes renders) ─────────────────────────
-    // Three sample artifacts: one complete (with a real-feel mediaUrl),
-    // one rendering (so the Studio renders the in-flight UI state),
-    // one failed (so the failure-path rendering is visible too).
-    // The "complete" artifact's mediaUrl points at a placeholder path
-    // that won't actually exist on disk locally — the page renders the
-    // <video> element regardless, and the user sees a play-failed
-    // poster which is the correct "rendered but not on this disk" UX
-    // for cold-start demo.
-    console.log("[seed] inserting 3 sample Studio artifacts...");
+    // ─── Studio artifacts ───────────────────────────────────────────────
+    // Sample artifacts across every adapter source so /studio's recent-
+    // renders list demos the FREE composers (satori, motion, hyperframes)
+    // alongside the METERED providers (higgsfield, runway, luma,
+    // elevenlabs, suno) — even before any real key is configured.
+    //
+    // Each row has a deterministic UUID + realistic prompt + status
+    // representative of how that adapter typically lands. Complete
+    // rows point at placeholder paths that may not exist on disk
+    // locally — the player elements render either way, and a missing
+    // file shows the right "rendered but not on this disk" UX for a
+    // cold-start demo.
+    console.log("[seed] inserting Studio artifacts across all adapters...");
     const artifactValues: NewArtifact[] = [
       {
         id: stableUuid(8, 0),
@@ -924,6 +927,156 @@ async function main(): Promise<void> {
           "npx hyperframes exited 1. stderr: ffmpeg encoder libx264 not available — install with: brew install ffmpeg --with-libx264 (or set HYPERFRAMES_CODEC=h264_videotoolbox on Apple Silicon).",
         costUsd: 0,
         createdAt: new Date(Date.now() - 10 * 60 * 1000), // 10min ago
+      },
+      // ─── Satori (FREE, image, complete) ────────────────────────────
+      {
+        id: stableUuid(8, 3),
+        companyId: DEMO_COMPANY_ID,
+        kind: "image",
+        source: "satori",
+        title: "Q3 governance metrics — LinkedIn header",
+        prompt:
+          "A LinkedIn header card: foundation governance Q3 metrics — 3 proposals submitted, 2 ratified, 94.3% validator participation.",
+        status: "complete",
+        mediaUrl: "/uploads/satori/sample-q3-governance.png",
+        mediaMimeType: "image/png",
+        providerMeta: {
+          aspectRatio: "16:9",
+          dimensions: { w: 1920, h: 1080 },
+          template: "editorial",
+          providerModelId: "satori-editorial-v1",
+        },
+        costUsd: 0,
+        createdAt: new Date(Date.now() - 4 * 60 * 60 * 1000), // 4h ago
+      },
+      // ─── Motion (FREE, video, complete) ────────────────────────────
+      {
+        id: stableUuid(8, 4),
+        companyId: DEMO_COMPANY_ID,
+        kind: "video",
+        source: "motion",
+        title: "Quick stat reveal — daily-active growth",
+        prompt:
+          "A 5-second stat reveal: 'DAU growth: +47% MoM' on charcoal background, no animation.",
+        status: "complete",
+        mediaUrl: "/uploads/motion/sample-dau-growth.mp4",
+        mediaMimeType: "video/mp4",
+        providerMeta: {
+          aspectRatio: "16:9",
+          durationSec: 5,
+          dimensions: { w: 1920, h: 1080 },
+          encoder: "libx264",
+          providerModelId: "motion-drawtext-v1",
+        },
+        costUsd: 0,
+        createdAt: new Date(Date.now() - 3 * 60 * 60 * 1000), // 3h ago
+      },
+      // ─── Higgsfield (METERED, video, complete) ────────────────────
+      {
+        id: stableUuid(8, 5),
+        companyId: DEMO_COMPANY_ID,
+        kind: "video",
+        source: "higgsfield",
+        title: "Cinematic product reveal — orbital camera move",
+        prompt:
+          "A 5-second cinematic product reveal with an orbital camera move around a product silhouette, charcoal-to-amber lighting, 16:9 broadcast quality.",
+        status: "complete",
+        mediaUrl: "/uploads/stubs/higgsfield-placeholder.mp4",
+        mediaMimeType: "video/mp4",
+        providerMeta: {
+          aspectRatio: "16:9",
+          durationSec: 5,
+          cameraMove: "orbit",
+          stub: true,
+          providerModelId: "higgsfield-mix-v1",
+          wouldHaveCost: 0.55,
+        },
+        costUsd: 0.55,
+        createdAt: new Date(Date.now() - 2 * 60 * 60 * 1000), // 2h ago
+      },
+      // ─── Runway (METERED, video, complete) ────────────────────────
+      {
+        id: stableUuid(8, 6),
+        companyId: DEMO_COMPANY_ID,
+        kind: "video",
+        source: "runway",
+        title: "Strong-motion social clip — 5s LinkedIn vertical",
+        prompt:
+          "A 5-second vertical (9:16) social clip with strong motion: a cityscape morning timelapse, soft warm light, ending on a single window lit.",
+        status: "complete",
+        mediaUrl: "/uploads/stubs/runway-placeholder.mp4",
+        mediaMimeType: "video/mp4",
+        providerMeta: {
+          aspectRatio: "9:16",
+          durationSec: 5,
+          stub: true,
+          providerModelId: "gen3a-turbo",
+          wouldHaveCost: 1.50,
+        },
+        costUsd: 1.50,
+        createdAt: new Date(Date.now() - 90 * 60 * 1000), // 1.5h ago
+      },
+      // ─── Luma (METERED, video, rendering) ────────────────────────
+      {
+        id: stableUuid(8, 7),
+        companyId: DEMO_COMPANY_ID,
+        kind: "video",
+        source: "luma",
+        title: "9-second sustainability hero — long take",
+        prompt:
+          "A 9-second hero video for an ESG-aligned campaign: a long take of solar panels at golden hour, slow camera dolly, no cuts.",
+        status: "rendering",
+        mediaUrl: null,
+        mediaMimeType: "video/mp4",
+        providerMeta: {
+          aspectRatio: "16:9",
+          durationSec: 9,
+          providerModelId: "ray-2",
+        },
+        costUsd: 0,
+        createdAt: new Date(Date.now() - 60 * 1000), // 1min ago
+      },
+      // ─── ElevenLabs (METERED, audio, complete) ───────────────────
+      {
+        id: stableUuid(8, 8),
+        companyId: DEMO_COMPANY_ID,
+        kind: "audio",
+        source: "elevenlabs",
+        title: "Q4 results narration — 30s",
+        prompt:
+          "A 30-second narration in a measured, institutional voice. Script: 'Q4 was the strongest quarter on record. Revenue grew 47% year-over-year. The closed-loop pipeline shipped end-to-end in week 12. Read the full investor brief at the link below.'",
+        status: "complete",
+        mediaUrl: "/uploads/stubs/elevenlabs-placeholder.mp3",
+        mediaMimeType: "audio/mpeg",
+        providerMeta: {
+          voiceId: "21m00Tcm4TlvDq8ikWAM",
+          charCount: 240,
+          stub: true,
+          providerModelId: "eleven_multilingual_v2",
+          wouldHaveCost: 0.072,
+        },
+        costUsd: 0.072,
+        createdAt: new Date(Date.now() - 6 * 60 * 60 * 1000), // 6h ago
+      },
+      // ─── Suno (METERED, audio, complete) ─────────────────────────
+      {
+        id: stableUuid(8, 9),
+        companyId: DEMO_COMPANY_ID,
+        kind: "audio",
+        source: "suno",
+        title: "Brand intro track — 30s loop",
+        prompt:
+          "A 30-second brand intro loop in the style of synthwave + minimalist piano. Tempo 110bpm, key D minor, no vocals. Suitable for podcast intro + LinkedIn video background.",
+        status: "complete",
+        mediaUrl: "/uploads/stubs/suno-placeholder.mp3",
+        mediaMimeType: "audio/mpeg",
+        providerMeta: {
+          stub: true,
+          providerModelId: "chirp-v3-5",
+          wouldHaveCost: 0.10,
+        },
+        costUsd: 0.10,
+        createdAt: new Date(Date.now() - 5 * 60 * 60 * 1000), // 5h ago
       },
     ];
     await tx.insert(artifacts).values(artifactValues).onConflictDoNothing();
