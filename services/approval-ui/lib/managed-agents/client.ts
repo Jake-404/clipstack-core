@@ -69,6 +69,20 @@ export function getEnvironmentId(): string | null {
 }
 
 /**
+ * The skill ID for Mira's voice. Created once via
+ * `scripts/publish-mira-voice.ts` and persisted to .env.local.
+ *
+ * Optional: when unset, agents fall back to voice rules in their
+ * system prompt. When set, agents attach the skill and the voice
+ * rules live in the skill body — single source of truth across every
+ * Mira-driven agent (digest, future research crew, vertical-pack
+ * composition, etc).
+ */
+export function getMiraVoiceSkillId(): string | null {
+  return process.env.MANAGED_AGENTS_MIRA_VOICE_SKILL_ID ?? null;
+}
+
+/**
  * Convenience for routes that need both the client and the IDs to
  * spawn a session. Returns null if MA isn't configured (digest agent
  * or environment not set up); the route should fall back gracefully

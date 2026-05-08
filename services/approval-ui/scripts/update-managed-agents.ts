@@ -42,11 +42,14 @@ import { resolve } from "node:path";
   }
 })();
 
-import { getAnthropicClient, getDigestAgentId } from "@/lib/managed-agents/client";
+import {
+  getAnthropicClient,
+  getDigestAgentId,
+} from "@/lib/managed-agents/client";
 import {
   DIGEST_AGENT_MODEL,
-  DIGEST_AGENT_SYSTEM_PROMPT,
   DIGEST_AGENT_TOOLS,
+  composeDigestSystemPrompt,
 } from "@/lib/managed-agents/digest-agent";
 
 async function main(): Promise<void> {
@@ -65,27 +68,39 @@ async function main(): Promise<void> {
 
   // Read current version for the optimistic-concurrency check on update.
   const current = await client.beta.agents.retrieve(agentId);
-  console.log(`[managed-agents:update]   agent.id:      ${current.id}`);
+  console.log(`[managed-agents:update]   agent.id:        ${current.id}`);
   console.log(`[managed-agents:update]   current.version: ${current.version}`);
-  console.log(`[managed-agents:update]   current.model: ${typeof current.model === "string" ? current.model : current.model?.id}`);
+  console.log(`[managed-agents:update]   current.model:   ${typeof current.model === "string" ? current.model : current.model?.id}`);
+
+  // Voice now lives in the system prompt (composed from
+  // skills/mira-voice/SKILL.md), not as an attached MA Skill.
+  // Skill-as-attachment was tested 2026-05-08 and rejected on
+  // latency grounds — see digest-agent.ts comment for the data.
+  // Pass `skills: []` to actively clear any previously-attached skill.
+  const composedPrompt = composeDigestSystemPrompt();
 
   console.log("");
   console.log(`[managed-agents:update] writing new config:`);
   console.log(`[managed-agents:update]   model:  ${DIGEST_AGENT_MODEL}`);
   console.log(`[managed-agents:update]   tools:  [${DIGEST_AGENT_TOOLS.length} entries]`);
-  console.log(`[managed-agents:update]   prompt: ${DIGEST_AGENT_SYSTEM_PROMPT.length} chars`);
+  console.log(`[managed-agents:update]   prompt: ${composedPrompt.length.toLocaleString("en-US")} chars (voice + task)`);
+  console.log(`[managed-agents:update]   skills: [] (voice now system-prompt-injected)`);
 
   const updated = await client.beta.agents.update(agentId, {
     version: current.version,
     model: DIGEST_AGENT_MODEL,
-    system: DIGEST_AGENT_SYSTEM_PROMPT,
+    system: composedPrompt,
     tools: [...DIGEST_AGENT_TOOLS],
+    skills: [], // clear any previously-attached skill
   });
 
   console.log("");
   console.log(`[managed-agents:update]   ✓ updated`);
   console.log(`[managed-agents:update]   new.version:   ${updated.version}`);
   console.log(`[managed-agents:update]   new.model:     ${typeof updated.model === "string" ? updated.model : updated.model?.id}`);
+  if ("skills" in updated && Array.isArray(updated.skills)) {
+    console.log(`[managed-agents:update]   new.skills:    [${updated.skills.length} attached]`);
+  }
 }
 
 main()

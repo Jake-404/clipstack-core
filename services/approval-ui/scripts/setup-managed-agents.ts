@@ -53,8 +53,8 @@ import {
 import {
   DIGEST_AGENT_MODEL,
   DIGEST_AGENT_NAME,
-  DIGEST_AGENT_SYSTEM_PROMPT,
   DIGEST_AGENT_TOOLS,
+  composeDigestSystemPrompt,
 } from "@/lib/managed-agents/digest-agent";
 
 async function main(): Promise<void> {
@@ -90,7 +90,7 @@ async function main(): Promise<void> {
     model: DIGEST_AGENT_MODEL,
     description:
       "Reads a workspace's weekly digest data (top performers, lessons captured, anomalies, decisions made) and writes a 200-word editorial recap in Clipstack's voice. Used by the /digest page's 'Generate narrative' button.",
-    system: DIGEST_AGENT_SYSTEM_PROMPT,
+    system: composeDigestSystemPrompt(),
     tools: [...DIGEST_AGENT_TOOLS],
   });
   console.log(`[managed-agents:setup]   ✓ agent.id: ${agent.id}`);

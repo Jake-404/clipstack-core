@@ -22,52 +22,75 @@
 
 import type Anthropic from "@anthropic-ai/sdk";
 
+import { getMiraVoiceBody } from "./voice";
+
 // ─── Agent definition ───────────────────────────────────────────────────
 
 export const DIGEST_AGENT_NAME = "Clipstack Weekly Digest";
 
 /**
- * The system prompt for the digest agent. Defines voice + structure +
- * length. Doc 8 + the editorial-voice memory captured in CLAUDE.md
- * codify the brand voice; this is the digest-specific application.
+ * The digest-task-specific instructions. Combined with the Mira voice
+ * body at agent-update time to form the full system prompt. Voice is
+ * the load-bearing constraint; this is the task layer on top.
  *
  * Length guidance: 180-220 words. Long enough to surface 3 specific
  * data points, short enough to read in 60 seconds aloud (≈ 60-second
  * video voice-over at conversational pace).
- *
- * Output constraints: plain prose, no headers, no bullet points. The
- * UI renders it as a single paragraph block.
  */
-export const DIGEST_AGENT_SYSTEM_PROMPT = `You are Mira, the Clipstack workspace orchestrator. Once a week you write a 200-word recap of what your team did. The recap is the kind of thing the workspace owner reads in 60 seconds before their first meeting Monday morning.
+export const DIGEST_TASK_INSTRUCTIONS = `## This agent's task: weekly digest
 
-Voice:
-- Editorial, institutional. Lead with the user's problem, not the platform feature.
-- Two-sentence paragraphs over four. Cut the third adjective.
-- Mono-numerals for every metric. Avoid hedge words ("simply", "essentially").
-- Grandiose-over-specific framing — "you shipped a week of work" reads better than "you published 12 drafts".
+Once a week, write a 200-word recap of what the workspace's team did. The recap is what the workspace owner reads in 60 seconds before their first meeting Monday morning.
+
+You will receive structured digest data in the user message — top performers, lessons captured, decisions made, throughput numbers. Read it, then write the recap.
 
 Structure:
 - Open with the headline finding (the top performer or the most consequential decision).
 - Middle paragraph names a second specific data point — a captured lesson, an anomaly, a decision pattern.
 - Close with one concrete recommendation for next week, anchored in the data.
 
-Length: 180-220 words. Plain prose, no headers, no bullet points, no markdown.
+Length: 180-220 words.
 
-You will receive structured digest data in the user message. Read it, then write the recap. Do not echo the data back; do not list every number. Pick the 2-3 most consequential and let them carry the narrative.`;
+Do not echo the data back. Do not list every number. Pick the 2-3 most consequential data points and let them carry the narrative. Apply Mira's voice (above) to every sentence.`;
 
 /**
- * Tools the agent gets. v1 ships with NO tools — the digest task is
- * "read structured input, write 200-word prose"; no bash, no fetch,
- * no file ops needed. Empirically (smoke-test 2026-05-08) leaving
- * the prebuilt `agent_toolset_20260401` enabled cost ~120s / ~12k
- * output tokens per run because the model burned thinking tokens
- * reasoning about whether to use tools it never used. Empty toolset
- * → faster + cheaper for the same output quality.
+ * Compose the full system prompt: Mira's voice (loaded from
+ * skills/mira-voice/SKILL.md) followed by the digest-specific task
+ * instructions. The voice body is the same content that would be
+ * uploaded as an MA Skill, but injected here for cheaper latency
+ * (system prompts cache; skills load + reason per session).
  *
- * v2 (Hyperframes 60s video render) will re-enable the prebuilt
- * toolset — the agent will need bash to invoke `npx hyperframes
- * render` and write the MP4 to the artifact path. Update this
- * constant + run scripts/update-managed-agents.ts at that point.
+ * Same composition pattern works for any future Mira-driven agent:
+ * import getMiraVoiceBody() + concatenate with the agent-specific
+ * task instructions.
+ */
+export function composeDigestSystemPrompt(): string {
+  return `${getMiraVoiceBody()}\n\n---\n\n${DIGEST_TASK_INSTRUCTIONS}`;
+}
+
+
+/**
+ * Tools the agent gets. Currently empty — voice is system-prompt-
+ * injected (no skill to load), digest data arrives in the user
+ * message (no tools to fetch), output is plain prose (no tools to
+ * write). Empty toolset is the cheapest possible inference surface.
+ *
+ * History:
+ *   - v1.0 (commit e70263d): full `agent_toolset_20260401` enabled
+ *     by default. Cost ~120s / ~12k out tokens because the model
+ *     burned thinking on whether to invoke 5 tools it never used.
+ *   - v1.0.1 (commit 9dbfa1d): tools dropped entirely. ~15s, ~400
+ *     out tokens. Voice in inline system prompt.
+ *   - v1.1 (intra-day 2026-05-08): re-enabled `read` to load Mira
+ *     voice as an MA Skill. Cost regressed to ~50s, 1-in-3 timeout
+ *     risk. Kept the architectural cleanliness, lost the latency.
+ *   - v1.2 (this): tools dropped again. Voice moved to system-prompt
+ *     injection from skills/mira-voice/SKILL.md (read at
+ *     agent-update time, not session time). Restored ~15s baseline,
+ *     kept multi-agent voice reuse via composeDigestSystemPrompt().
+ *
+ * v2 (Hyperframes 60s video render) will enable `bash` for `npx
+ * hyperframes render`. Update this constant + run
+ * scripts/update-managed-agents.ts at that point.
  */
 export const DIGEST_AGENT_TOOLS: ReadonlyArray<never> = [];
 
