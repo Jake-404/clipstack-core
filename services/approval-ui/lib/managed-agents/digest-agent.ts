@@ -184,10 +184,13 @@ export interface NarrateResult {
  * Spawn a digest agent session, kick it with the digest data, drain
  * events to idle, return the assembled narrative.
  *
- * Why drain-to-idle vs streaming back to the client: the digest output
- * is short enough (~200 words ≈ 1.5s of model output at typical Opus
- * 4.7 throughput) that the SSE complexity doesn't pay off for v1. If
- * v2 adds the video render path (which is 30-60s), we add SSE there.
+ * Why drain-to-idle vs streaming back to the client: the full session
+ * round-trip (create → kickoff → 200-word output → idle) measures
+ * ~15s on the tuned Sonnet-4.6-no-tools config (smoke-test 2026-05-08).
+ * SSE complexity doesn't pay off at that scale — the user pays the
+ * latency cost inline and sees the recap appear in one shot. If v2
+ * adds the Hyperframes video render path (which is 30-60s), we add
+ * SSE there because the wait is long enough to need progress feedback.
  */
 export async function narrateDigest(
   client: Anthropic,
