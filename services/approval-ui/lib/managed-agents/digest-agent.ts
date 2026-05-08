@@ -72,16 +72,36 @@ You will receive structured digest data in the user message. Read it, then write
 export const DIGEST_AGENT_TOOLS: ReadonlyArray<never> = [];
 
 /**
- * The model that powers the agent. Sonnet 4.6 over Opus 4.7 because
- * the task is editorial-from-structured-input, not agentic reasoning
- * — Opus's strength is multi-step exploration, which a 200-word
- * recap doesn't need. Sonnet produces voice-aligned output at ~3-5x
- * lower cost and ~2-3x lower latency than Opus 4.7 in the smoke-test
- * envelope.
+ * The model that powers the agent. **Sonnet 4.6, locked 2026-05-08
+ * after a 3v3 head-to-head against Opus 4.7** (both with empty tools).
  *
- * If editorial quality regresses (the recap reads as generic vs. the
- * brand voice), bump back to claude-opus-4-7 and accept the latency
- * tradeoff. The agent definition is one update call away.
+ * Empirical comparison (3 runs each, scripts/smoke-test-managed-agents.ts
+ * against stub digest data):
+ *
+ *                   Sonnet 4.6        Opus 4.7
+ *   latency         15.2s × 3 (zero   35-61s (one run crossed the
+ *                   variance)         60s route timeout — 504 risk)
+ *   output tokens   324-444           2,164-5,770 (5-15× more)
+ *   est. cost/call  ~$0.006           ~$0.10 (17× more)
+ *   word count      184-206           181-197
+ *   voice quality   consistent floor  higher peaks, lower floor
+ *
+ * Quality verdict: Opus had two excellent runs ("editorial attention
+ * concentrates where the percentile lives instead of where the volume
+ * is", "That single capture will outlast every metric on this page")
+ * and one merely-competent run. Sonnet had three voice-aligned runs
+ * with comparable grandiose framing ("the audience is already living
+ * inside the problem Clipstack solves", "1 of them will still matter
+ * in a year").
+ *
+ * For a recurring user-facing surface (digest fires weekly per
+ * workspace), consistent quality beats occasional brilliance, and
+ * the latency variance on Opus would force a maxDuration bump +
+ * timeout-handling code path that Sonnet doesn't need.
+ *
+ * If you want to re-run the comparison: edit this constant to
+ * "claude-opus-4-7", run scripts/update-managed-agents.ts, then
+ * scripts/smoke-test-managed-agents.ts ≥3 times.
  */
 export const DIGEST_AGENT_MODEL = "claude-sonnet-4-6" as const;
 
