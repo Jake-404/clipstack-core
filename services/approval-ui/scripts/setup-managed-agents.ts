@@ -17,10 +17,41 @@
 // Required env: ANTHROPIC_API_KEY (a real one — Managed Agents is a
 // real beta surface and creates real billable resources).
 
+// Load .env.local before the client import resolves, so the script
+// "just works" via `pnpm exec tsx scripts/setup-managed-agents.ts`
+// without needing the user to export envs manually. Next.js loads
+// .env.local automatically for `next dev`/`next build`; standalone
+// tsx invocations don't, so we bridge the gap inline (zero new deps).
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+(function loadEnvLocal() {
+  const envPath = resolve(process.cwd(), ".env.local");
+  if (!existsSync(envPath)) return;
+  for (const rawLine of readFileSync(envPath, "utf8").split("\n")) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq < 0) continue;
+    const key = line.slice(0, eq).trim();
+    if (!/^[A-Z_][A-Z0-9_]*$/i.test(key)) continue;
+    if (process.env[key]) continue; // shell-set vars win
+    let value = line.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    process.env[key] = value;
+  }
+})();
+
 import {
   getAnthropicClient,
 } from "@/lib/managed-agents/client";
 import {
+  DIGEST_AGENT_MODEL,
   DIGEST_AGENT_NAME,
   DIGEST_AGENT_SYSTEM_PROMPT,
   DIGEST_AGENT_TOOLS,
@@ -56,7 +87,7 @@ async function main(): Promise<void> {
   console.log("[managed-agents:setup] creating digest agent...");
   const agent = await client.beta.agents.create({
     name: DIGEST_AGENT_NAME,
-    model: "claude-opus-4-7",
+    model: DIGEST_AGENT_MODEL,
     description:
       "Reads a workspace's weekly digest data (top performers, lessons captured, anomalies, decisions made) and writes a 200-word editorial recap in Clipstack's voice. Used by the /digest page's 'Generate narrative' button.",
     system: DIGEST_AGENT_SYSTEM_PROMPT,

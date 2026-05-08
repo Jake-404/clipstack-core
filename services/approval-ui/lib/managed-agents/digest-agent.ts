@@ -56,17 +56,34 @@ Length: 180-220 words. Plain prose, no headers, no bullet points, no markdown.
 You will receive structured digest data in the user message. Read it, then write the recap. Do not echo the data back; do not list every number. Pick the 2-3 most consequential and let them carry the narrative.`;
 
 /**
- * Tools the agent gets. v1 ships with the prebuilt agent toolset
- * (bash, read, write, web_search, web_fetch) — overkill for the
- * narrative-only path but the right baseline when v2 adds the
- * Hyperframes video render. Default permission policy is
- * always_allow because the agent operates on its own sandboxed
- * container; the data going in is already vetted (workspace-scoped,
- * RLS-filtered).
+ * Tools the agent gets. v1 ships with NO tools — the digest task is
+ * "read structured input, write 200-word prose"; no bash, no fetch,
+ * no file ops needed. Empirically (smoke-test 2026-05-08) leaving
+ * the prebuilt `agent_toolset_20260401` enabled cost ~120s / ~12k
+ * output tokens per run because the model burned thinking tokens
+ * reasoning about whether to use tools it never used. Empty toolset
+ * → faster + cheaper for the same output quality.
+ *
+ * v2 (Hyperframes 60s video render) will re-enable the prebuilt
+ * toolset — the agent will need bash to invoke `npx hyperframes
+ * render` and write the MP4 to the artifact path. Update this
+ * constant + run scripts/update-managed-agents.ts at that point.
  */
-export const DIGEST_AGENT_TOOLS = [
-  { type: "agent_toolset_20260401" as const, default_config: { enabled: true } },
-];
+export const DIGEST_AGENT_TOOLS: ReadonlyArray<never> = [];
+
+/**
+ * The model that powers the agent. Sonnet 4.6 over Opus 4.7 because
+ * the task is editorial-from-structured-input, not agentic reasoning
+ * — Opus's strength is multi-step exploration, which a 200-word
+ * recap doesn't need. Sonnet produces voice-aligned output at ~3-5x
+ * lower cost and ~2-3x lower latency than Opus 4.7 in the smoke-test
+ * envelope.
+ *
+ * If editorial quality regresses (the recap reads as generic vs. the
+ * brand voice), bump back to claude-opus-4-7 and accept the latency
+ * tradeoff. The agent definition is one update call away.
+ */
+export const DIGEST_AGENT_MODEL = "claude-sonnet-4-6" as const;
 
 // ─── Session spawning ──────────────────────────────────────────────────
 
